@@ -90,12 +90,3 @@ func problems(p corev1.Pod) string {
 
 
 
-
-
-func (t *Tools) GetEvents(ctx context.Context) (string, error) {
-	events, err := t.client.CoreV1().Events(t.namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return "", fmt.Errorf("listing events in %s: %w", t.namespace, err)
-	}
-	
-}
