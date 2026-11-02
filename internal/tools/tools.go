@@ -80,6 +80,9 @@ func problems(p corev1.Pod) string {
 		if last := c.LastTerminationState.Terminated; last != nil {
 			parts = append(parts, fmt.Sprintf("%s last: %s (exit %d)", c.Name, last.Reason, last.ExitCode))
 		}
+		if term := c.State.Terminated; term != nil {
+			parts = append(parts, fmt.Sprintf("%s terminated: %s (exit %d)", c.Name, term.Reason, term.ExitCode))
+		}
 	}
 	return strings.Join(parts, ", ")
 }
