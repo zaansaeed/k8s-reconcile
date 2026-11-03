@@ -43,4 +43,11 @@ func main() {
 		log.Fatalf("get pods: %v", err)
 	}
 	fmt.Print(out)
+
+	events, err := t.GetEvents(ctx)
+	if err != nil {
+		log.Fatalf("get events: %v", err)
+	}
+
+	fmt.Print(events)
 }
