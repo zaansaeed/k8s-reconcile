@@ -22,6 +22,8 @@ func main() {
 	}
 	kubeconfig := flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig")
 	namespace := flag.String("namespace", "default", "namespace the tools operate in")
+	pod := flag.String("pod", "", "pod to read logs from; skipped when empty")
+	previous := flag.Bool("previous", false, "read the previous container instance's log")
 	flag.Parse()
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
@@ -50,4 +52,13 @@ func main() {
 	}
 
 	fmt.Print(events)
+
+	if *pod == "" {
+		return
+	}
+	logs, err := t.GetLogs(ctx, *pod, *previous)
+	if err != nil {
+		log.Fatalf("get logs: %v", err)
+	}
+	fmt.Print(logs)
 }
