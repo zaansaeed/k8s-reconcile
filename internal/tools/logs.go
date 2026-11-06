@@ -20,7 +20,7 @@ func (t *Tools) GetLogs(ctx context.Context, pod string, previous bool) (string,
 		Previous:  previous,
 	}
 
-	stream, err := t.client.CoreV1().Pods(t.namespace).GetLogs(pod, opts).Stream(ctx)
+	stream, err := t.client.CoreV1().Pods(t.namespace).GetLogs(pod, opts).Stream(ctx) //stream rather than bytes since api can throw errors and we want them decoded properly.
 	if err != nil {
 		if apierrors.IsBadRequest(err) {
 			return fmt.Sprintf("no logs available for pod %s: %s\n", pod, err.Error()), nil
