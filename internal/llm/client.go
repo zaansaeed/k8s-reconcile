@@ -21,7 +21,7 @@ func New(config Config, specs []tools.Spec) *Client {
 	return &Client{
 		api:      anthropic.NewClient(),
 		config:   config,
-		toolDefs: toolParams(specs),
+		toolDefs: toolParams(specs), //ours specs -> SDK's tool definitions
 	}
 }
 
@@ -55,22 +55,34 @@ func (client *Client) Model() string {
 	return client.config.Model
 }
 
-// Send makes one API call with the conversation so far and returns the
-// assistant's text, the tools it wants run, and what the call cost in tokens.
-func (client *Client) Send(ctx context.Context, messages []anthropic.MessageParam) (*Reply, error) {
+// params assembles one request from the client's standing settings and the
+// conversation so far.
+func (client *Client) params(messages []anthropic.MessageParam) anthropic.MessageNewParams {
 	system := []anthropic.TextBlockParam{{Text: client.config.System}} //prompt
 	if client.config.CacheSystem {
-		system[0].CacheControl = anthropic.NewCacheControlEphemeralParam()
+		// Marks where the cached prefix ends. The server renders a request as
+		// tools -> system -> messages, so a breakpoint on the final system
+		// block caches every tool schema and the system prompt as one entry,
+		// leaving the growing message history outside it. Those bytes are
+		// identical on every call, so step 1 writes the entry and every later
+		// step reads it at a fraction of the input price.
+		system[len(system)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
 	}
 
-	response, err := client.api.Messages.New(ctx, anthropic.MessageNewParams{ // send to client.
+	return anthropic.MessageNewParams{
 		Model:        anthropic.Model(client.config.Model),
 		MaxTokens:    client.config.MaxTokens,
 		System:       system,
 		Messages:     messages,
 		Tools:        client.toolDefs,
 		OutputConfig: anthropic.OutputConfigParam{Effort: client.config.Effort},
-	})
+	}
+}
+
+// Send makes one API call with the conversation so far and returns the
+// assistant's text, the tools it wants run, and what the call cost in tokens.
+func (client *Client) Send(ctx context.Context, messages []anthropic.MessageParam) (*Reply, error) {
+	response, err := client.api.Messages.New(ctx, client.params(messages)) // send to client.
 	if err != nil {
 		return nil, fmt.Errorf("messages call to %s: %w", client.config.Model, err)
 	}
