@@ -65,7 +65,7 @@ func main() {
 
 	client := llm.New(llm.DefaultConfig(agent.SystemPrompt), tools.Specs())
 	run := &telemetry.Run{Model: client.Model()}
-	diagnoser := agent.New(client, kube, run, *maxSteps)
+	diagnoser := agent.New(client, kube, run, *maxSteps) //init agent
 	if *verbose {
 		diagnoser.OnStep = printStep
 	}
@@ -80,7 +80,7 @@ func main() {
 	} else {
 		fmt.Printf("%s\n", result.Answer)
 	}
-	fmt.Println("TOTAL METRICS")
+	fmt.Println("\n------------TOTAL METRICS------------")
 	fmt.Printf("\nsteps %d  in %d (uncached 1x)  out %d  cache_write %d (1.25x)  cache_read %d (0.05x)\n",
 		run.Steps,
 		run.Usage.InputTokens,
@@ -103,10 +103,10 @@ func printStep(info agent.StepInfo) {
 		info.Usage.CacheReadTokens,
 	)
 
-	if text := strings.TrimSpace(info.Text); text != "" {
+	if text := strings.TrimSpace(info.Text); text != "" && len(info.Calls) != 0 {
 		fmt.Printf("  %s\n", firstLine(text, 160))
 	}
-
+	
 	for _, call := range info.Calls {
 		fmt.Printf("  model use -> %s %s\n", call.Name, call.Input)
 		output := info.Results[call.ID]
