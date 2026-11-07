@@ -80,7 +80,7 @@ func main() {
 	} else {
 		fmt.Printf("%s\n", result.Answer)
 	}
-
+	fmt.Println("TOTAL METRICS")
 	fmt.Printf("\nsteps %d  in %d (uncached 1x)  out %d  cache_write %d (1.25x)  cache_read %d (0.05x)\n",
 		run.Steps,
 		run.Usage.InputTokens,
