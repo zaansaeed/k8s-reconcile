@@ -41,8 +41,8 @@ func (t *Tools) GetEvents(ctx context.Context) (string, error) {
 		obj := strings.ToLower(e.InvolvedObject.Kind) + "/" + e.InvolvedObject.Name
 		msg := strings.TrimSpace(e.Message)
 		fmt.Fprintf(&b, "%s  %s  %s  %s", e.Type, e.Reason, obj, msg)
-		if n := eventCount(e); n > 1 {
-			fmt.Fprintf(&b, "  (x%d)", n)
+		if eventCount(e) > 1 {
+			b.WriteString("  (repeated)")
 		}
 		b.WriteString("\n")
 	}

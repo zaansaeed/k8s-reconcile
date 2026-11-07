@@ -24,7 +24,7 @@ func (t *Tools) GetPods(ctx context.Context) (string, error) {
 
 	var b strings.Builder
 	for _, p := range pods.Items {
-		fmt.Fprintf(&b, "%s  %s  ready=%s  restarts=%d", p.Name, p.Status.Phase, readyCount(p), restarts(p))
+		fmt.Fprintf(&b, "%s  %s  ready=%s  restarts=%s", p.Name, p.Status.Phase, readyCount(p), restarts(p))
 		if r := problems(p); r != "" {
 			fmt.Fprintf(&b, "  %s", r)
 		}
@@ -44,12 +44,21 @@ func readyCount(p corev1.Pod) string {
 	return fmt.Sprintf("%d/%d", ready, len(p.Spec.Containers))
 }
 
-func restarts(p corev1.Pod) int32 {
+func restarts(p corev1.Pod) string {
 	var n int32
 	for _, c := range p.Status.ContainerStatuses {
 		n += c.RestartCount
 	}
-	return n
+	switch {
+	case n == 0:
+		return "none"
+	case n == 1:
+		return "1"
+	case n <= 5:
+		return "several"
+	default:
+		return "many"
+	}
 }
 
 // problems summarizes why containers are unhealthy, e.g.

@@ -8,7 +8,7 @@ Method:
 - Start with get_pods to see which workloads are unhealthy and how.
 - A pod's phase alone rarely explains a fault. Read the container-level waiting reason and the restart count.
 - Use get_events when status names a symptom but not a cause. Image pull failures, scheduling failures and probe failures are explained there. Events also name the owning Deployment and ReplicaSet, which is how you identify the object that needs changing.
-- Use get_logs when a container started and then failed. For a CrashLoopBackOff the current log is usually empty and previous=true holds the real error.
+- Use get_logs when a container started and then failed. previous=false returns the most recent attempt, including one that has already exited, and is the right default. Use previous=true only when the container is running again and the crash you care about was an earlier instance.
 - Call several tools in one turn when their results do not depend on each other.
 
 Rules:
