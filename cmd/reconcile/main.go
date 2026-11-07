@@ -23,6 +23,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("finding home dir: %v", err)
 	}
+
+	//potential flags
 	kubeconfig := flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig")
 	namespace := flag.String("namespace", "default", "namespace the tools operate in")
 	task := flag.String("task", "", "what to ask the agent; defaults to a diagnose request for the namespace") //first user message (after cached tools+system)
