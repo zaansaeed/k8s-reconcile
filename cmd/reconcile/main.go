@@ -12,6 +12,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/zaansaeed/k8s-reconcile/internal/agent"
+	"github.com/zaansaeed/k8s-reconcile/internal/llm"
+	"github.com/zaansaeed/k8s-reconcile/internal/telemetry"
 	"github.com/zaansaeed/k8s-reconcile/internal/tools"
 )
 
@@ -22,8 +25,12 @@ func main() {
 	}
 	kubeconfig := flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig")
 	namespace := flag.String("namespace", "default", "namespace the tools operate in")
-	pod := flag.String("pod", "", "pod to read logs from; skipped when empty")
-	previous := flag.Bool("previous", false, "read the previous container instance's log")
+	task := flag.String("task", "", "what to ask the agent; defaults to a diagnose request for the namespace") //first user message (after cached tools+system)
+	maxSteps := flag.Int("max-steps", 12, "model calls before the agent gives up")
+	timeout := flag.Duration("timeout", 5*time.Minute, "deadline for the whole run")
+	dump := flag.Bool("dump", false, "print raw tool output and exit instead of running the agent")
+	pod := flag.String("pod", "", "with -dump, pod to read logs from; skipped when empty")
+	previous := flag.Bool("previous", false, "with -dump, read the previous container instance's log")
 	flag.Parse()
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
@@ -36,29 +43,69 @@ func main() {
 	}
 
 	// One deadline shared by every request in this run.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	t := tools.New(clientset, *namespace)
-	out, err := t.GetPods(ctx)
-	if err != nil {
-		log.Fatalf("get pods: %v", err)
-	}
-	fmt.Print(out)
+	kube := tools.New(clientset, *namespace)
 
-	events, err := t.GetEvents(ctx)
-	if err != nil {
-		log.Fatalf("get events: %v", err)
-	}
-
-	fmt.Print(events)
-
-	if *pod == "" {
+	if *dump {
+		if err := dumpTools(ctx, kube, *pod, *previous); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
-	logs, err := t.GetLogs(ctx, *pod, *previous)
+
+	if *task == "" {
+		*task = fmt.Sprintf("Namespace %s has a broken workload. Diagnose the root cause.", *namespace)
+	}
+
+	client := llm.New(llm.DefaultConfig(agent.SystemPrompt), tools.Specs())
+	run := &telemetry.Run{Model: client.Model()}
+	diagnoser := agent.New(client, kube, run, *maxSteps)
+
+	result, err := diagnoser.Run(ctx, *task)
 	if err != nil {
-		log.Fatalf("get logs: %v", err)
+		log.Fatalf("agent run: %v", err)
+	}
+
+	if result.Exhausted {
+		fmt.Printf("no answer: gave up after %d steps\n", result.Steps)
+	} else {
+		fmt.Printf("%s\n", result.Answer)
+	}
+
+	fmt.Printf("\nsteps %d  in %d  out %d  cache_write %d  cache_read %d\n",
+		run.Steps,
+		run.Usage.InputTokens,
+		run.Usage.OutputTokens,
+		run.Usage.CacheWriteTokens,
+		run.Usage.CacheReadTokens,
+	)
+	if cost, known := run.CostUSD(); known {
+		fmt.Printf("cost $%.4f (%s)\n", cost, run.Model)
+	}
+}
+
+func dumpTools(ctx context.Context, kube *tools.Tools, pod string, previous bool) error {
+	pods, err := kube.GetPods(ctx)
+	if err != nil {
+		return fmt.Errorf("get pods: %w", err)
+	}
+	fmt.Print(pods)
+
+	events, err := kube.GetEvents(ctx)
+	if err != nil {
+		return fmt.Errorf("get events: %w", err)
+	}
+	fmt.Print(events)
+
+	if pod == "" {
+		return nil
+	}
+	logs, err := kube.GetLogs(ctx, pod, previous)
+	if err != nil {
+		return fmt.Errorf("get logs: %w", err)
 	}
 	fmt.Print(logs)
+	return nil
 }
