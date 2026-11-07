@@ -81,7 +81,7 @@ func main() {
 		fmt.Printf("%s\n", result.Answer)
 	}
 
-	fmt.Printf("\nsteps %d  in %d  out %d  cache_write %d  cache_read %d\n",
+	fmt.Printf("\nsteps %d  in %d (uncached 1x)  out %d  cache_write %d (1.25x)  cache_read %d (0.05x)\n",
 		run.Steps,
 		run.Usage.InputTokens,
 		run.Usage.OutputTokens,
@@ -94,7 +94,7 @@ func main() {
 }
 
 func printStep(info agent.StepInfo) {
-	fmt.Printf("step %d  %s  in %d  out %d  cache_write %d  cache_read %d\n",
+	fmt.Printf("step %d  %s  in %d (uncached 1x)  out %d  cache_write %d (1.25x)  cache_read %d (0.05x)\n",
 		info.N,
 		info.Elapsed.Round(time.Millisecond),
 		info.Usage.InputTokens,
@@ -108,7 +108,7 @@ func printStep(info agent.StepInfo) {
 	}
 
 	for _, call := range info.Calls {
-		fmt.Printf("  -> %s %s\n", call.Name, call.Input)
+		fmt.Printf("  model use -> %s %s\n", call.Name, call.Input)
 		output := info.Results[call.ID]
 		fmt.Printf("     %s  (%d bytes)\n", firstLine(output, 120), len(output))
 	}
