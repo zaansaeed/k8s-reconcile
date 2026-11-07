@@ -61,7 +61,7 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 		}
 
 		results := make(map[string]string, len(reply.Calls)) // toolID -> output of tool
-		for _, call := range reply.Calls { // we have calls to make
+		for _, call := range reply.Calls {                   // we have calls to make
 			output, err := agent.tools.Dispatch(ctx, call.Name, call.Input)
 			if err != nil {
 				return nil, fmt.Errorf("step %d: tool %s: %w", step, call.Name, err)
