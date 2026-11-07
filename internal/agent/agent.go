@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go/v2"
 
@@ -20,6 +21,23 @@ type Agent struct {
 	tools    *tools.Tools
 	run      *telemetry.Run
 	maxSteps int
+
+	OnStep func(StepInfo)
+}
+
+type StepInfo struct {
+	N       int
+	Text    string
+	Calls   []llm.ToolCall
+	Results map[string]string
+	Usage   llm.Usage
+	Elapsed time.Duration
+}
+
+func (agent *Agent) emit(info StepInfo) {
+	if agent.OnStep != nil {
+		agent.OnStep(info)
+	}
 }
 
 // New returns an Agent that gives up after maxSteps model calls.
@@ -41,7 +59,9 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 	}
 
 	for step := 1; step <= agent.maxSteps; step++ {
+		started := time.Now()
 		reply, err := agent.client.Send(ctx, messages)
+		elapsed := time.Since(started)
 		if err != nil {
 			return nil, fmt.Errorf("step %d: %w", step, err)
 		}
@@ -56,7 +76,16 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 			return nil, fmt.Errorf("step %d: conversation outgrew the context window", step)
 		}
 
+		info := StepInfo{
+			N:       step,
+			Text:    reply.Text,
+			Calls:   reply.Calls,
+			Usage:   reply.Usage,
+			Elapsed: elapsed,
+		}
+
 		if len(reply.Calls) == 0 { // no more tool calls. we must be done.
+			agent.emit(info)
 			return &Result{Answer: reply.Text, Steps: step}, nil
 		}
 
@@ -68,6 +97,9 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 			}
 			results[call.ID] = output
 		}
+		info.Results = results
+		agent.emit(info)
+
 		//append the LLMs response as well as our response (tool call results the LLM wanted)
 		messages = append(messages, reply.Message.ToParam(), llm.ToolResults(results))
 	}

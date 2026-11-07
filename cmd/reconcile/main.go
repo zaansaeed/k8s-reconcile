@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -30,6 +31,7 @@ func main() {
 	task := flag.String("task", "", "what to ask the agent; defaults to a diagnose request for the namespace") //first user message (after cached tools+system)
 	maxSteps := flag.Int("max-steps", 12, "model calls before the agent gives up")
 	timeout := flag.Duration("timeout", 5*time.Minute, "deadline for the whole run")
+	verbose := flag.Bool("verbose", false, "print each step as the agent takes it")
 	dump := flag.Bool("dump", false, "print raw tool output and exit instead of running the agent")
 	pod := flag.String("pod", "", "with -dump, pod to read logs from; skipped when empty")
 	previous := flag.Bool("previous", false, "with -dump, read the previous container instance's log")
@@ -64,6 +66,9 @@ func main() {
 	client := llm.New(llm.DefaultConfig(agent.SystemPrompt), tools.Specs())
 	run := &telemetry.Run{Model: client.Model()}
 	diagnoser := agent.New(client, kube, run, *maxSteps)
+	if *verbose {
+		diagnoser.OnStep = printStep
+	}
 
 	result, err := diagnoser.Run(ctx, *task)
 	if err != nil {
@@ -86,6 +91,39 @@ func main() {
 	if cost, known := run.CostUSD(); known {
 		fmt.Printf("cost $%.4f (%s)\n", cost, run.Model)
 	}
+}
+
+func printStep(info agent.StepInfo) {
+	fmt.Printf("step %d  %s  in %d  out %d  cache_write %d  cache_read %d\n",
+		info.N,
+		info.Elapsed.Round(time.Millisecond),
+		info.Usage.InputTokens,
+		info.Usage.OutputTokens,
+		info.Usage.CacheWriteTokens,
+		info.Usage.CacheReadTokens,
+	)
+
+	if text := strings.TrimSpace(info.Text); text != "" {
+		fmt.Printf("  %s\n", firstLine(text, 160))
+	}
+
+	for _, call := range info.Calls {
+		fmt.Printf("  -> %s %s\n", call.Name, call.Input)
+		output := info.Results[call.ID]
+		fmt.Printf("     %s  (%d bytes)\n", firstLine(output, 120), len(output))
+	}
+
+	fmt.Println()
+}
+
+func firstLine(s string, max int) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
 }
 
 func dumpTools(ctx context.Context, kube *tools.Tools, pod string, previous bool) error {
