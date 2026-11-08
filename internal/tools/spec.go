@@ -7,6 +7,52 @@ type Spec struct {
 	Required    []string
 }
 
+// WriteSpecs describes the tools that change the cluster. They are kept apart
+// from Specs so a diagnosis run is never offered them.
+func WriteSpecs() []Spec {
+	return []Spec{
+		{
+			Name: "apply_patch",
+			Description: "Change a Deployment's pod template with a strategic merge patch. The patch is checked by the API server in a dry run first; if it is rejected, nothing changes and you get the error. On success you get the deployment as it now reads. " +
+				"A patch may only change spec.template. Replica counts, selectors, other kinds and Secrets cannot be changed. " +
+				"Lists are merged by a key rather than replaced: containers, env and volumes by name, but volumeMounts by mountPath, so changing a mount's path with a plain patch adds a second mount instead of moving the first.",
+			Properties: map[string]any{
+				"kind": map[string]any{
+					"type":        "string",
+					"enum":        []string{"Deployment"},
+					"description": "Kind of the object to change. Only Deployment is supported.",
+				},
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Name of the deployment, exactly as get_deployments reported it.",
+				},
+				"patch": map[string]any{
+					"type":        "string",
+					"description": "The strategic merge patch, as a JSON object encoded in a string. Example: {\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"api\",\"image\":\"busybox:1.36\"}]}}}}",
+				},
+			},
+			Required: []string{"kind", "name", "patch"},
+		},
+		{
+			Name: "wait_for_rollout",
+			Description: "Wait for a deployment's rollout to finish after a patch, then report the outcome and the current state of every pod in the namespace. " +
+				"Complete means every pod runs the new template and is available. If it is not finished when the timeout ends, the report says why, such as a new pod that keeps crashing. " +
+				"A fix can reveal a second fault that the first one was hiding, so read the pods in the report before deciding you are done.",
+			Properties: map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Name of the deployment, exactly as get_deployments reported it.",
+				},
+				"timeout_seconds": map[string]any{
+					"type":        "integer",
+					"description": "How long to wait, from 1 to 120 seconds. Defaults to 60.",
+				},
+			},
+			Required: []string{"name"},
+		},
+	}
+}
+
 // Specs describes the read-only tools to the model, in a fixed order.
 func Specs() []Spec {
 	return []Spec{
