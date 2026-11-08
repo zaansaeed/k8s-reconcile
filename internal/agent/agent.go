@@ -18,7 +18,7 @@ import (
 // tools it may run, and the run it records token usage into.
 type Agent struct {
 	client   *llm.Client
-	tools    *tools.Tools
+	tools    *tools.Toolbox
 	run      *telemetry.Run
 	maxSteps int
 
@@ -41,7 +41,7 @@ func (agent *Agent) emit(info StepInfo) {
 }
 
 // New returns an Agent that gives up after maxSteps model calls.
-func New(client *llm.Client, kube *tools.Tools, run *telemetry.Run, maxSteps int) *Agent {
+func New(client *llm.Client, kube *tools.Toolbox, run *telemetry.Run, maxSteps int) *Agent {
 	return &Agent{client: client, tools: kube, run: run, maxSteps: maxSteps}
 }
 

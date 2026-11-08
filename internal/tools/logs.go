@@ -13,7 +13,7 @@ const maxLogLines = 50
 
 // get logs for a specific pod. If previous = true, returns previous container instance within same pod
 // max of 50 log lines
-func (t *Tools) GetLogs(ctx context.Context, pod string, previous bool) (string, error) {
+func (t *Toolbox) GetLogs(ctx context.Context, pod string, previous bool) (string, error) {
 	tail := int64(maxLogLines)
 	opts := &corev1.PodLogOptions{
 		TailLines: &tail,

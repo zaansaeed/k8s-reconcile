@@ -72,11 +72,11 @@ func main() {
 		return
 	}
 
-	prompt, specs := agent.SystemPrompt, tools.Specs()
+	prompt := agent.SystemPrompt
 	defaultTask := "Namespace %s has a broken workload. Diagnose the root cause."
 	if *allowWrites {
 		kube.EnableWrites()
-		prompt, specs = agent.RepairPrompt, append(specs, tools.WriteSpecs()...)
+		prompt = agent.RepairPrompt
 		defaultTask = "Namespace %s has a broken workload. Diagnose and repair it."
 	}
 	if *task == "" {
@@ -85,7 +85,7 @@ func main() {
 
 	config := llm.DefaultConfig(prompt)
 	config.Model = llm.ResolveModel(*model)
-	client := llm.New(config, specs)
+	client := llm.New(config, kube.Specs())
 	run := &telemetry.Run{Model: client.Model()}
 	diagnoser := agent.New(client, kube, run, *maxSteps) //init agent
 	if *verbose {
@@ -158,7 +158,7 @@ func firstLine(s string, max int) string {
 	return s
 }
 
-func dumpTools(ctx context.Context, kube *tools.Tools, pod string, previous bool) error {
+func dumpTools(ctx context.Context, kube *tools.Toolbox, pod string, previous bool) error {
 	pods, err := kube.GetPods(ctx)
 	if err != nil {
 		return fmt.Errorf("get pods: %w", err)

@@ -12,7 +12,7 @@ import (
 // GetPods returns one line per pod with phase, readiness, restarts and, when a
 // container is unhealthy, the reason. Phase alone hides most faults
 // (ImagePullBackOff is still "Pending"), so container details are included.
-func (t *Tools) GetPods(ctx context.Context) (string, error) {
+func (t *Toolbox) GetPods(ctx context.Context) (string, error) {
 	pods, err := t.client.CoreV1().Pods(t.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("listing pods in %s: %w", t.namespace, err)

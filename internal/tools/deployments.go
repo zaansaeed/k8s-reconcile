@@ -18,7 +18,7 @@ const maxDeployments = 10
 // GetDeployments returns every deployment in the namespace as compact text:
 // replica counts, rollout conditions and the pod template. This is the desired
 // state the model compares against what get_pods and get_events report.
-func (t *Tools) GetDeployments(ctx context.Context) (string, error) {
+func (t *Toolbox) GetDeployments(ctx context.Context) (string, error) {
 	deps, err := t.client.AppsV1().Deployments(t.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("listing deployments in %s: %w", t.namespace, err)

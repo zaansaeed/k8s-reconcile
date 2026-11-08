@@ -40,7 +40,7 @@ const (
 // WaitForRollout polls a deployment until its rollout completes, fails, or the
 // timeout ends, then reports the outcome. Its feedback is how the agent learns
 // whether a fix worked, or exposed a fault the first one was hiding.
-func (t *Tools) WaitForRollout(ctx context.Context, name string, timeout time.Duration) (string, error) {
+func (t *Toolbox) WaitForRollout(ctx context.Context, name string, timeout time.Duration) (string, error) {
 	if timeout <= 0 {
 		timeout = defaultRolloutWait
 	}
@@ -123,7 +123,7 @@ func rolloutStatus(d *appsv1.Deployment) (rolloutState, string) {
 // or has exited. Without a readiness probe, a crash-looping container counts as
 // available in the moments it runs, so rollout status alone can't catch it.
 // It returns "" when every pod looks stable.
-func (t *Tools) unstablePod(ctx context.Context, d *appsv1.Deployment) (string, error) {
+func (t *Toolbox) unstablePod(ctx context.Context, d *appsv1.Deployment) (string, error) {
 	selector, err := metav1.LabelSelectorAsSelector(d.Spec.Selector)
 	if err != nil {
 		return "", fmt.Errorf("reading selector of deployment %s: %w", d.Name, err)
@@ -153,7 +153,7 @@ func (t *Tools) unstablePod(ctx context.Context, d *appsv1.Deployment) (string, 
 
 // rolloutReport states the verdict and why, then lists every pod in the
 // namespace, since a fix to one deployment can leave another still broken.
-func (t *Tools) rolloutReport(ctx context.Context, d *appsv1.Deployment, state rolloutState, detail string, waited time.Duration) (string, error) {
+func (t *Toolbox) rolloutReport(ctx context.Context, d *appsv1.Deployment, state rolloutState, detail string, waited time.Duration) (string, error) {
 	var b strings.Builder
 	switch state {
 	case rolloutComplete:
