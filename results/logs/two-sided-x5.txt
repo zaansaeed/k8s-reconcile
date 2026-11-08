@@ -1,0 +1,1717 @@
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault: port mismatch between `api` and `cache`.**
+
+1. **Faulty object:** `deployment/cache`
+   - **Field:** `spec.template.spec.containers[cache].args` = `["--port", "6380"]`. Redis listens on 6380, but the container port and the api's expectation are 6379.
+   - **Fix:** Remove the `--port 6380` override (Redis defaults to 6379), or keep it and change `CACHE_PORT` in `deployment/api` to `6380`. The simpler fix is to drop the override so the cache matches the 6379 the api and the cache's declared port (`6379/TCP`) both expect.
+   - **Evidence:** get_deployments shows the cache args and the port 6379 declaration. get_logs on `cache-7554d5445f-zqx59` shows `Running mode=standalone, port=6380` and "Ready to accept connections".
+
+2. **Symptom object:** `deployment/api` (pod `api-6bdd974567-t9vlk`, ready 0/1, Available=False)
+   - **Field:** The readiness probe `nc -z -w 2 $CACHE_HOST $CACHE_PORT` fails because `CACHE_PORT=6379` (env value in the deployment) points to a port nothing listens on.
+   - **Fix:** Resolved by fixing the cache port above. No change is needed to the api's probe or command.
+   - **Evidence:** get_logs on the api pod repeats `ERROR: cannot reach cache at cache:6379`. get_events shows repeated readiness probe failures on the api pod. get_pods shows the api at ready=0/1 while the cache is ready=1/1.
+
+The cache pod itself is healthy (no restarts, Available=True). The fault is only the port disagreement.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3082 (uncached 1x)  out 890  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0010 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is healthy again. There was one fault, and it was in the cache deployment.
+
+**Fault: `deployment/cache` started Redis on the wrong port**
+- **What was wrong:** The container args were `["--port", "6380"]`, so Redis listened on 6380. The container's declared port and the api's `CACHE_PORT` both expect 6379. The api therefore could not reach `cache:6379`, its readiness probe kept failing, and it stayed at 0/1 ready. The cache pod itself was running fine, which is why the problem was easy to miss.
+- **Patch applied:**
+  ```
+  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+  ```
+- **Rollout result:** The rollout completed. The new pod `cache-6d587c6cd7-w45jb` stayed up for 10s without restarting, and 1 of 1 pods was available.
+
+**Verification:** `api-6bdd974567-qwpc4` is now 1/1 ready with no restarts. Its log has moved from `ERROR: cannot reach cache at cache:6379` to `cache ok`.
+
+No other changes were made. The api deployment was not patched because its config and probe were correct. Nothing needed a value I could not supply, so nothing is outstanding.
+
+------------TOTAL METRICS------------
+
+steps 5  in 9848 (uncached 1x)  out 1253  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0019 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1: deployment/cache listens on the wrong port**
+- **Field:** `spec.template.spec.containers[cache].args` is currently `["--port", "6380"]`.
+- **Fix:** Remove the `--port 6380` args so Redis uses its default port, 6379. That matches the container's own declared port (6379/TCP) and the `CACHE_PORT=6379` that api uses. (The other option is to change api's `CACHE_PORT` and anything else pointing at the cache to 6380, but 6379 is what everything else already expects.)
+- **Evidence:**
+  - get_deployments: cache has `args: ["--port" "6380"]` but declares port 6379/TCP. api has `CACHE_HOST=cache`, `CACHE_PORT=6379`, and its readiness probe runs `nc -z cache 6379`.
+  - get_logs on cache-7554d5445f-b5d2m: `Running mode=standalone, port=6380.`
+  - get_logs on api-6bdd974567-c5dvm: repeated `ERROR: cannot reach cache at cache:6379`.
+  - get_pods: api-6bdd974567-c5dvm is Running but ready=0/1, because its readiness probe keeps failing. cache is 1/1, so the cache pod itself is fine; only its port is wrong.
+
+I couldn't check the `cache` Service, because no tool here lists Services. Its port and targetPort are presumably 6379, which fits the api's errors.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2364 (uncached 1x)  out 708  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0315 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+I found and fixed one fault. The namespace is now healthy.
+
+**Fault 1: Deployment/cache**
+- **What was wrong:** Redis was started with `args: ["--port","6380"]`, and its log confirmed `Running mode=standalone, port=6380`. But the container declares port `6379/TCP`, and the api connects to `cache:6379` (`CACHE_PORT=6379`). Nothing was listening on 6379, so the api logged `ERROR: cannot reach cache at cache:6379` and its readiness probe (`nc -z cache 6379`) kept failing. That left the api at 0/1 ready.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}`. Redis now listens on 6379, the port it declares and the one the api uses.
+- **Rollout result:** complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and the pod stayed up without restarting for 10s.
+
+Although the cache pod showed as ready, its wrong port was the cause, so I patched the cache rather than the api. I left the api deployment unchanged. Its settings matched the cache's declared port, and its readiness probe was checking the right thing.
+
+**Final state:** `api-6bdd974567-7ttx4` is Running 1/1 with no restarts, and `cache-6d587c6cd7-7966n` is Running 1/1 with no restarts.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5871 (uncached 1x)  out 1181  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0585 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault 1: Deployment/backend, listen port mismatch**
+- **Field:** `args`, which starts `httpd -f -p 8081 -h /www`. The declared `port` is `8080/TCP`.
+- **Fix:** Make the listen port match what the Service and the declared port expect. Either change `-p 8081` to `-p 8080` in the backend args, or, if 8081 is intended, change the declared port and the Service `targetPort` to 8081. The Service manifest is not visible to my tools, so I could not confirm which port it targets.
+- **Evidence:**
+  - get_deployments: backend args use `-p 8081`, and the container port is 8080/TCP.
+  - get_logs (frontend): every check fails with `wget: can't connect to remote host (10.96.183.187): Connection refused`, so nothing is listening on the port the Service forwards to.
+  - get_pods: backend is Running and ready 1/1 only because it has no probe. Its httpd is serving on 8081, not the expected port.
+  - get_logs (backend): no output, which is consistent with httpd running silently in the foreground.
+
+**Fault 2: Deployment/frontend, not ready (a symptom of Fault 1)**
+- **Field:** `readinessProbe`, which runs `wget -q -T 2 -O /dev/null "$BACKEND_URL"` with `BACKEND_URL=http://backend/`. The probe fails because the backend is unreachable.
+- **Fix:** No change is needed on the frontend. It should become Ready once Fault 1 is corrected.
+- **Evidence:** get_pods shows frontend at ready=0/1. get_events shows repeated `Readiness probe failed: ... Connection refused`. get_logs (frontend) shows `ERROR: backend unavailable at http://backend/`.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3042 (uncached 1x)  out 1080  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+The namespace is healthy. There was one fault, in the backend.
+
+**Fault: `deployment/backend` listened on the wrong port.** The container declares port 8080, and the frontend reaches it at `http://backend/`. But the httpd command was started with `-p 8081`, so nothing answered on 8080. The frontend's readiness probe got "connection refused" on every check, so the frontend never became ready.
+
+**Patch applied:** I changed the backend's args so httpd listens on the declared port, `exec httpd -f -p 8080 -h /www`. The rest of the command is unchanged. I did not touch the frontend, its probe, or the service, because the frontend was correct and the backend was the side that disagreed with its declared port.
+
+**Rollout result:** The rollout completed. The new pod `backend-84d8b8595f-llzwx` is Running 1/1 with no restarts, and it stayed up for the settling period. The old pod was terminating. `frontend-86899448f4-zqx4f` is now Running 1/1 with no restarts, and its readiness probe passes.
+
+**Current state:** Both workloads are healthy.
+
+One thing I could not verify: I could not read the Service object, so I did not confirm its targetPort. The fix works because the frontend now reaches a live backend on 8080. If the Service's targetPort were something other than 8080, the frontend would still have failed, so it is worth a glance at the Service if anything regresses.
+
+------------TOTAL METRICS------------
+
+steps 4  in 7467 (uncached 1x)  out 1821  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0017 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/backend
+- **Wrong field:** the container's `args`. The server is started with `httpd -f -p 8081 -h /www`, so it listens on **8081**. But the container's declared port is **8080/TCP**.
+- **Fix:** Change the args to `httpd -f -p 8080 ...` so the server listens on the declared port 8080. The other option is to point the declared port, and the Service's targetPort, at 8081. Changing the args is the smaller change.
+- **Evidence:**
+  - get_deployments shows the backend args use `-p 8081` while the declared port is `8080/TCP`.
+  - get_logs for frontend-86899448f4-rdb6p repeats `wget: can't connect to remote host (10.96.174.236): Connection refused` and `ERROR: backend unavailable at http://backend/`. The host name resolves to an IP, but the connection is refused, which fits nothing listening on the port the traffic is sent to.
+  - get_pods shows backend at 1/1 Ready, because it has no probe to catch the wrong port.
+- **Inference:** I have no tool that shows Services, so the Service's targetPort is assumed, not read. I'm assuming it targets 8080, the declared container port.
+
+**Symptom, not a separate fault:** deployment/frontend shows 0/1 Ready (get_pods), with Available=False (get_deployments). Its readiness probe runs `wget "$BACKEND_URL"` against `http://backend/`, and the probe fails while the backend is unreachable. The frontend's own configuration looks correct.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2139 (uncached 1x)  out 773  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0249 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+I fixed the one fault, and the namespace is now healthy: both pods are ready.
+
+**Fault: Deployment/backend**
+- **What was wrong:** The backend declares container port 8080, but its command started the web server on port 8081. When the frontend called `http://backend/`, the connection was refused because nothing was listening on the port the traffic was sent to. The frontend's readiness check (which fetches that same URL) kept failing, so the frontend stayed at 0/1 ready. The backend's own pod looked healthy because it has no probe of its own. I couldn't read the backend Service with these tools. The refused connections and the declared port point to it forwarding to 8080, but I haven't confirmed that directly.
+- **Patch applied:** I changed the server's port in the args from 8081 to 8080 to match the declared port:
+  `{"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 available, none from the old template still running, and it stayed up for 10 seconds without restarting.
+
+**Deployment/frontend** needed no change. It was failing only because it couldn't reach the backend. After the backend fix, `frontend-86899448f4-nj6bw` became ready (1/1) with no restarts.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5556 (uncached 1x)  out 1006  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0440 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+**Fault: `deployment/api` has the wrong Redis password.**
+
+- **Field:** `spec.template.spec.containers[api].env` → `REDIS_PASSWORD` is `"bravo-2m9q"`.
+- **Fix:** Set `REDIS_PASSWORD` to the password the cache actually requires, `alpha-7f3k`. Better, move it into a Secret shared by `cache`, `worker` and `api`, and reference it with `secretKeyRef` so the values cannot drift again. Then roll the api deployment.
+- **Evidence (get_deployments):**
+  - `deployment/cache` starts Redis with `--requirepass alpha-7f3k`.
+  - `deployment/worker` uses `REDIS_PASSWORD = "alpha-7f3k"` and is Available and ready 1/1, so that value is accepted.
+  - `deployment/api` uses `REDIS_PASSWORD = "bravo-2m9q"`. Its readiness probe runs `redis-cli ... ping` with that password and must return PONG, so it cannot pass. The deployment reports `Available=False, MinimumReplicasUnavailable`.
+- **Corroboration (get_pods):** `api-58c596c9d7-kcf4c` is Running with ready=0/1 and no restarts. This matches a readiness failure rather than a crash. The `cache` and `worker` pods are ready.
+
+I did not call get_logs or get_events, so the "cache rejected ping" error text is inferred from the config, not read from the api container's output. The mismatch between the api password and the cache password is the root cause.
+
+------------TOTAL METRICS------------
+
+steps 2  in 1494 (uncached 1x)  out 790  cache_write 1456 (1.25x)  cache_read 1456 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+The namespace is healthy: every pod is Ready and the rollout completed.
+
+**Fault: `Deployment/api` had the wrong Redis password.**
+- **What was wrong:** The `REDIS_PASSWORD` env var was `bravo-2m9q`. The `cache` deployment starts Redis with `--requirepass alpha-7f3k`, so every ping was rejected with `WRONGPASS`. The `api` readiness probe never passed, which kept the deployment unavailable. The `worker` deployment uses `alpha-7f3k` and was already ready, which pointed to the correct value.
+- **Patch applied:** Set the `api` container's `REDIS_PASSWORD` env value to `alpha-7f3k`. I did not change the probe, the command, or the cache.
+- **Rollout result:** Complete. The new pod `api-675754565f-vflnz` is 1/1 Ready with no restarts and stayed up for the settling period. The old pod `api-58c596c9d7-489xh` is terminating.
+
+**Current state:** `api`, `cache` and `worker` are all running at 1/1 Ready with no restarts.
+
+**Note:** The password is stored as a plain env value in the Deployment rather than in a Secret. I left that as it was, because the tools cannot change Secrets, and the task only needed the value corrected.
+
+------------TOTAL METRICS------------
+
+steps 5  in 14716 (uncached 1x)  out 1124  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0024 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+The api pod is running but never becomes ready because it uses the wrong password for the cache.
+
+- **Faulty object:** deployment/api
+- **Field:** container `api`, env `REDIS_PASSWORD`. Its current value is `"bravo-2m9q"`.
+- **Fix:** Set `REDIS_PASSWORD` to `"alpha-7f3k"`, the password the cache was started with. A better long-term fix is to have both api and cache read the password from one shared Secret so they can't drift apart again.
+- **Evidence:**
+  - **get_deployments:**
+    - deployment/cache runs `redis:7.4` with args `--requirepass alpha-7f3k`.
+    - deployment/worker uses `REDIS_PASSWORD="alpha-7f3k"` and is ready (1/1).
+    - deployment/api uses `"bravo-2m9q"` and shows `Available=False`, reason `MinimumReplicasUnavailable`.
+    - api's readiness probe expects a `PONG` reply from `redis-cli` using that password, so it keeps failing.
+  - **get_pods:** `api-58c596c9d7-6s2sq` is Running with ready 0/1 and no restarts. This is a readiness failure, not a crash. cache and worker are both 1/1.
+  - **get_logs (api-58c596c9d7-6s2sq):** The log repeats `AUTH failed: WRONGPASS invalid username-password pair or user is disabled.` and `NOAUTH Authentication required.` The single `Connection refused` at the top probably came from api starting before cache was up. Every later line is an auth rejection.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3436 (uncached 1x)  out 697  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0355 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+I found one fault, in the api deployment, and fixed it. The namespace is now healthy.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** The api was sending the wrong password to the cache. Its `REDIS_PASSWORD` was set to `"bravo-2m9q"`, but the cache only accepts `alpha-7f3k` (set by `--requirepass alpha-7f3k` in its args). The worker, which uses `alpha-7f3k`, was healthy. The api logs showed repeated `AUTH failed: WRONGPASS invalid username-password pair`. Its readiness probe pings the cache with the same password, so that failed too and the pod never became ready (0/1).
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template and 1 is available. The new pod `api-675754565f-59s2t` is Running and ready (1/1) and stayed up for 10s without restarting. The old pod is terminating.
+
+**Namespace status:** Healthy. api, cache and worker are all Running and ready (1/1). I didn't change cache or worker.
+
+------------TOTAL METRICS------------
+
+steps 4  in 6311 (uncached 1x)  out 853  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0537 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault: `deployment/api` has the wrong cache hostname.**
+
+- **Field:** `env CACHE_HOST` on container `api` is `"redis"`.
+- **Fix:** Set `CACHE_HOST` to `"cache"`, the name the working `worker` deployment uses. The api's readiness probe and its loop both read this variable, so changing it fixes both. Port `CACHE_PORT=6379` is unaffected.
+- **Evidence:**
+  - get_pods: `api-fdf7c5c48-lmvtr` is Running with ready=0/1. No restarts, so the container is healthy but never becomes ready.
+  - get_deployments: `api` shows `Available=False`, `MinimumReplicasUnavailable`, and `CACHE_HOST: value "redis"`. The readiness probe is `nc -z -w 2 "$CACHE_HOST" "$CACHE_PORT"`.
+  - get_events: repeated `Unhealthy` warning on `pod/api-fdf7c5c48-lmvtr`: `Readiness probe failed: nc: bad address 'redis'`.
+  - get_logs (api): `nc: bad address 'redis'` followed by `ERROR: cannot reach cache at redis:6379`, repeated. The failure is DNS name resolution, not a closed port.
+  - get_deployments and get_pods: `worker` uses `CACHE_HOST: "cache"` and its pod is ready=1/1 with its exec readiness probe passing. That suggests `cache` resolves in this namespace, while `redis` does not. I could not list Services directly, so the exact Service name is inferred from the worker's passing probe, not read from a Service object.
+
+No other workload is unhealthy. `redis` is ready, and `worker` is ready.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3930 (uncached 1x)  out 1351  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+The namespace is healthy: all three deployments are available and every pod is ready. One fault was found and fixed.
+
+**Fault: `deployment/api` pointed at a cache hostname that does not resolve**
+- **What was wrong:** The api container's `CACHE_HOST` was `redis`. The api pod's logs showed `nc: bad address 'redis'`, so the hostname failed DNS lookup. Its readiness probe checks the same host, so it kept failing and the deployment never became available. The `redis` deployment itself was healthy.
+- **How I confirmed the right name:** The worker deployment uses `CACHE_HOST=cache` and its logs show `cache ok` on every check, so `cache` is the name that resolves to the cache.
+- **Patch applied:** Set `CACHE_HOST` to `cache` on the `api` container. `CACHE_PORT` stayed `6379`, and the probe was not changed.
+- **Rollout result:** Reported complete. One new pod (`api-6978fd4c7-6ztww`) is running at 1/1 with no restarts, and it stayed up for 10 seconds. The old pod (`api-fdf7c5c48-9t6s8`) was terminating.
+
+------------TOTAL METRICS------------
+
+steps 5  in 10745 (uncached 1x)  out 1377  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0021 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"},{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api
+- **Field:** container `api`, env `CACHE_HOST`. Its current value is `"redis"`.
+- **Fix:** Change `CACHE_HOST` to `"cache"`, the same value deployment/worker uses. I couldn't list Services, so I'm inferring that `cache` is the Service name in front of the redis pod. I haven't seen that Service directly.
+- **Evidence:**
+  - get_logs on api-fdf7c5c48-bzzqg keeps repeating `nc: bad address 'redis'` and `ERROR: cannot reach cache at redis:6379`. The name `redis` doesn't resolve in DNS.
+  - get_pods shows the api pod as Running but ready=0/1. Its readiness probe runs `nc -z $CACHE_HOST $CACHE_PORT`, and that check fails.
+  - get_deployments shows deployment/worker with `CACHE_HOST="cache"` and port 6379, and the worker is ready=1/1. So `cache:6379` resolves and is reachable.
+  - get_deployments shows redis is healthy and listening on 6379/TCP, so the cache server itself is fine.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2789 (uncached 1x)  out 565  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0303 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+There was one fault, and I fixed it.
+
+**Fault 1**
+- **Object:** Deployment/api
+- **What was wrong:** The api container had `CACHE_HOST=redis`, but the name `redis` doesn't resolve in this namespace. Its logs showed `nc: bad address 'redis'` / `ERROR: cannot reach cache at redis:6379`, so the readiness probe kept failing and the pod stayed at 0/1 ready. The healthy worker deployment reaches the cache on port 6379 using `CACHE_HOST=cache`, and its logs show `cache ok`. I can't list Services with these tools, so this is based on the worker's working setting, not on looking at the Service directly.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}`. The probe and command are unchanged.
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, none are left from the old template, and the pod stayed up for 10s without restarting. The new pod `api-6978fd4c7-lxz2p` is Running and 1/1 ready, and the old pod is terminating.
+
+I didn't touch the redis and worker deployments, which were already healthy.
+
+**The namespace is now healthy:** api, redis and worker are all Running and 1/1 ready.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5259 (uncached 1x)  out 878  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0402 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1: Port mismatch between api and cache**
+
+- **Faulty object:** `deployment/cache` (the server side), with `deployment/api` as the client that is affected.
+- **Field that is wrong:** `deployment/cache` container `cache` runs `redis:7.4` with `args: ["--port" "6380"]`, so Redis listens on 6380. The `port: 6379/TCP` declared on that container is not what Redis binds to. `deployment/api` expects the cache on `CACHE_PORT=6379`.
+- **Fix:** Make the two agree. The simplest option is to remove the `--port 6380` arg from `deployment/cache` so Redis uses its default 6379. Alternatively, set `CACHE_PORT` on `deployment/api` to `6380`. Either change makes the api readiness probe (`nc -z cache 6379`) succeed.
+- **Evidence:**
+  - get_deployments: cache args `["--port" "6380"]` and port 6379/TCP; api env `CACHE_PORT=6379` and a readiness probe on `$CACHE_HOST $CACHE_PORT`.
+  - get_logs (cache pod): "Running mode=standalone, port=6380" and "Ready to accept connections tcp".
+  - get_logs (api pod): repeated "ERROR: cannot reach cache at cache:6379".
+  - get_pods: `api-6bdd974567-hnc49` is Running with ready=0/1 and no restarts. `cache-7554d5445f-6h45c` is ready=1/1.
+  - get_events: repeated Unhealthy readiness-probe failures on the api pod. The api deployment has Available=False (MinimumReplicasUnavailable).
+
+The cache pod is healthy. Only the api deployment is unavailable, and the cause is the port disagreement.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3050 (uncached 1x)  out 886  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0008 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is healthy: both deployments are Available and their pods are ready. The api pod that I'd been watching, `api-6bdd974567-6cnmj`, now logs `cache ok`. The other api pod (`api-b587cc64c-66qkj`) was terminating when I last checked.
+
+There was one fault, with two patches. My first patch was a mistake, and I reverted it.
+
+**Fault: `Deployment/cache` was started on the wrong port.** The container ran `redis-server --port 6380`, but the container port (6379) and the api's connection target were both 6379. The api could never reach the cache, so it never became ready.
+
+- **Patch 1 (incorrect):** I changed `Deployment/api` env `CACHE_PORT` from 6379 to 6380 to match the cache. The new api pod still could not connect. The Service in front of the cache forwards 6379, not 6380, so the client-side change did not fix the problem, and I should have checked that before patching.
+- **Patch 2 (root-cause fix):** I set `Deployment/cache` args to `[]`, which removes `--port 6380` so Redis uses its default 6379. Rollout result: complete, 1 of 1 available, stable for 10s, with the new pod `cache-84588965b8-p8j6j` ready at 1/1.
+- **Patch 3 (revert):** I set `Deployment/api` env `CACHE_PORT` back to 6379 so the api matches the cache. Rollout result: complete, 1 of 1 available, stable for 10s, with `api-6bdd974567-6cnmj` ready at 1/1 and no restarts.
+
+**Note:** I changed `Deployment/cache`, which was Available before I started. I did so because its misconfiguration was the cause of the failure, not because it was broken on its own terms. The cache has no probes, so readiness does not check the port. The Service definition is not visible through my tools, so the 6379 target is inferred from the container port and the api's original config, not read directly.
+
+------------TOTAL METRICS------------
+
+steps 8  in 39918 (uncached 1x)  out 4238  cache_write 0 (1.25x)  cache_read 16312 (0.1x)
+cost $0.0063 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (3)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6380"}]}]}}}}
+2. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":[]}]}}}}
+3. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/cache, container `cache`.
+- **Wrong field:** `args` is `["--port" "6380"]`. Redis listens on 6380, but the container declares port 6379/TCP, and the api connects to `cache:6379`.
+- **Fix:** Remove the `--port 6380` args, or set them to `["--port" "6379"]`, so Redis listens on 6379.
+- **Evidence:**
+  - get_deployments: the cache args are `--port 6380` with declared port 6379/TCP. The api env is `CACHE_HOST=cache` and `CACHE_PORT=6379`, and its readiness probe runs `nc -z cache 6379`.
+  - get_logs on cache-7554d5445f-dgsrc: "Running mode=standalone, port=6380."
+  - get_logs on api-6bdd974567-5rpld: "ERROR: cannot reach cache at cache:6379", repeated.
+  - get_pods: api-6bdd974567-5rpld is Running but ready=0/1 because its readiness probe fails. The deployment shows Available=False.
+
+I didn't check the `cache` Service, because no tool here shows Services. If its targetPort is set to 6380 on purpose, changing the api's `CACHE_PORT` to match would be the other fix. But the cache container's declared port of 6379 points to the args being the error.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2380 (uncached 1x)  out 694  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0313 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+I found one fault and fixed it. Both pods are now Ready.
+
+**Fault 1**
+- **Object:** Deployment/cache
+- **What was wrong:** The cache container's args were `["--port","6380"]`, so Redis listened on 6380 (its log said `Running mode=standalone, port=6380`). But the deployment declares port 6379, and the api is set to `CACHE_PORT=6379`. So the api could never connect: its log repeated `ERROR: cannot reach cache at cache:6379`, its readiness probe kept failing, and it stayed at 0/1 ready.
+  - The cache pod showed as healthy only because it has no probe. It was the cause even though the api was the pod showing the failure.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}`. This makes Redis listen on 6379 again, the port the deployment declares and the api expects. I didn't change the api, because its settings already matched the cache's declared port and its probe was checking the right thing.
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and the new pod stayed up for 10s without restarting. After that, the api pod `api-6bdd974567-5ld8x` went to Ready 1/1 without restarting, and the new cache pod `cache-6d587c6cd7-4btbk` is Ready 1/1.
+
+**Namespace status:** Healthy. Both deployments, api and cache, have all their pods Ready with no restarts.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5937 (uncached 1x)  out 1221  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0596 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault 1: `deployment/backend`, `-p 8081` in the httpd command does not match the declared port 8080**
+
+- **Field:** `spec.template.spec.containers[backend].args`. The script ends with `exec httpd -f -p 8081 -h /www`, but the container's port is `8080/TCP`.
+- **Current value:** httpd listens on 8081.
+- **Fix:** Make the listening port match the port the Service targets. Either change the args to `-p 8080`, or keep 8081 and change the containerPort and the Service `targetPort` to 8081. I could not read the Service object with these tools, so I cannot confirm which port it targets. The 8080 declaration points to the Service using 8080.
+- **Evidence:**
+  - get_deployments: backend args use `-p 8081`, port is `8080/TCP`.
+  - get_pods: backend is Running, ready 1/1, no restarts. The container is up, so the process starts, but the port it listens on is not the one being called.
+  - get_events and get_logs on frontend: readiness probe fails with `Connection refused` to the backend ClusterIP `10.96.191.243`, repeated, and the log shows `ERROR: backend unavailable at http://backend/`. A refused connection on a ClusterIP means nothing is listening on the forwarded port.
+  - get_logs on backend: no output, which is expected for httpd with no access logging. It does not contradict the port mismatch.
+
+**Fault 2 (symptom, not a root cause): `deployment/frontend`** is not Available (ready 0/1). Its readiness probe runs `wget` against `$BACKEND_URL` (`http://backend/`), which fails for the reason in Fault 1. Once the backend port is fixed, the frontend should become ready without changes of its own.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3091 (uncached 1x)  out 1231  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0011 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+The namespace is healthy now: both deployments are available and ready. One fault was found and fixed.
+
+**Fault: Deployment/backend, port mismatch**
+- **What was wrong:** The backend container declares port 8080, but its startup command ran `httpd -p 8081`. The `backend` Service routes to 8080, so nothing was listening there. The frontend's readiness probe (`wget http://backend/`) got "connection refused" and never went ready.
+- **Patch applied:** Changed the httpd listen port in the container args from 8081 to 8080. The rest of the args were kept the same.
+- **Rollout result:** Complete. The new pod `backend-84d8b8595f-hmjkx` is running and ready, with 0 restarts, and stayed up for 10s. The frontend pod `frontend-86899448f4-s8zwm` is now 1/1 ready. The old backend pod `backend-69b796f6fd-nwz4b` was still shown as Terminating on my last check.
+
+**Frontend:** I did not change `Deployment/frontend`. Its `BACKEND_URL` and readiness probe were correct, and it only failed because the backend was unreachable.
+
+**Caveat:** I could not read the `backend` Service object, so the 8080 target comes from the backend's declared port and the connection-refused errors, not from the Service spec directly. The frontend's readiness check passing now confirms the route works.
+
+------------TOTAL METRICS------------
+
+steps 5  in 9631 (uncached 1x)  out 1691  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0019 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/backend, container `backend`
+- **Wrong field:** `args`. The server starts with `exec httpd -f -p 8081 -h /www`, so it listens on **8081**. The container's declared port is **8080/TCP**.
+- **Fix:** Change the args to `httpd -f -p 8080 -h /www` so the server listens on the declared port 8080.
+- **Evidence:**
+  - `get_deployments`: backend args say `-p 8081`, but `port: 8080/TCP`.
+  - `get_logs` on frontend-86899448f4-qrzcj: `wget: can't connect to remote host (10.96.221.39): Connection refused` and `ERROR: backend unavailable at http://backend/`. The `backend` name resolves to an address, but nothing accepts the connection.
+  - `get_pods`: frontend is `ready=0/1` because its readiness probe runs `wget "$BACKEND_URL"`, which keeps failing. backend shows `1/1` ready because it has no probe, so the wrong port is not noticed.
+
+**Not verified:** my tools can't read Services, so I couldn't check the `backend` Service's `targetPort`. The port mismatch strongly suggests it sends traffic to 8080. If the Service actually targets 8081, the cause is something else and this diagnosis needs revisiting.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2098 (uncached 1x)  out 709  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0234 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+I fixed one fault, in the backend. The frontend was only failing because of it, and it went ready on its own after the fix.
+
+**Fault 1: Deployment/backend**
+- **What was wrong:** The deployment declares container port 8080, but its command started httpd on port 8081 (`httpd -f -p 8081`). The frontend calls `http://backend/`, and its logs and readiness-probe events kept showing "Connection refused" from the backend Service IP (10.96.174.145). I couldn't view the Service itself. A refused connection while httpd listened on a different port from the declared one points to the Service forwarding to 8080, where nothing was listening. The backend pod still looked healthy because it has no probe of its own.
+- **Patch applied:** I changed only the httpd port, from 8081 to 8080:
+  `{"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}`
+- **Rollout result:** "rollout of deployment/backend complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s."
+
+**Deployment/frontend**
+- **What was wrong:** Nothing in its own spec. Its readiness probe correctly checks whether the backend is reachable, and it failed only because the backend was listening on the wrong port.
+- **Patch applied:** None.
+- **Result:** After the backend fix, `frontend-86899448f4-b59c9` shows `Running ready=1/1 restarts=none`.
+
+**Namespace status:** Healthy. The new backend pod (`backend-84d8b8595f-lwcdk`) and the frontend pod are both Running and 1/1 ready with no restarts. The old backend pod was terminating when the patch result was reported.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5547 (uncached 1x)  out 1162  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0471 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+**Fault 1: `deployment/api` has the wrong Redis password.**
+
+- **Field:** `container api` → `env REDIS_PASSWORD` is the literal value `bravo-2m9q`.
+- **Fix:** Set `REDIS_PASSWORD` to the password the cache actually requires, `alpha-7f3k`. The cache, the worker, and the cache's `--requirepass` argument all use that value. Better still, move the value into a Secret and reference it from both `api` and `worker` so they cannot drift apart again.
+- **Evidence:**
+  - get_deployments: `cache` runs with `args: ["--requirepass" "alpha-7f3k"]`. `worker` uses `REDIS_PASSWORD` = `alpha-7f3k` and is healthy (1/1). `api` uses `bravo-2m9q`.
+  - get_logs on `api-58c596c9d7-l26q2`: repeated `AUTH failed: WRONGPASS invalid username-password pair`, followed by `NOAUTH Authentication required`.
+  - get_pods: `api-58c596c9d7-l26q2` is Running with ready=0/1. Its readiness probe runs the same redis-cli ping, so it never passes. That leaves `deployment/api` with available=0 and `MinimumReplicasUnavailable`.
+
+No other faults found. `cache` and `worker` are Available and ready. The earlier "Connection refused" line in the api logs is from before the cache was accepting connections and does not reflect the current state.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3548 (uncached 1x)  out 749  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+There was one fault, in `deployment/api`, and it is fixed. The namespace is healthy: all three workloads are running and ready.
+
+**Fault: `deployment/api` had the wrong Redis password.**
+- **What was wrong:** The api container's `REDIS_PASSWORD` was `bravo-2m9q`. The cache server is started with `--requirepass alpha-7f3k`, and the worker, which was already healthy, authenticates with `alpha-7f3k`. The api's pings were rejected with `WRONGPASS`, so its readiness probe failed and the deployment never became available.
+- **Patch applied:** Set the api container's `REDIS_PASSWORD` env value to `alpha-7f3k`, matching the cache and worker.
+- **Rollout result:** Complete. The new pod `api-675754565f-6x2bp` is 1/1 ready with no restarts, and the rollout reports 1 available and no old-template pods still running. The old pod `api-58c596c9d7-87ngg` was in Terminating and no longer appeared in the final pod list.
+
+**Not changed:** `deployment/cache` and `deployment/worker` were healthy, so I left them alone. The password is stored as a plain env value in the deployment, not in a Secret. Moving it into a Secret would be a good follow-up, but it was not needed for this fix.
+
+------------TOTAL METRICS------------
+
+steps 5  in 14503 (uncached 1x)  out 1300  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0024 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+There is one fault. The `api` container's Redis password doesn't match the one the cache server requires.
+
+**Object:** deployment/api, container `api`
+
+- **Wrong field:** `env REDIS_PASSWORD` is set to `"bravo-2m9q"`.
+- **Fix:** Set `REDIS_PASSWORD` to `"alpha-7f3k"`. That is the value deployment/cache passes as `--requirepass`, and deployment/worker already uses it.
+- **Evidence:**
+  - **get_pods:** pod `api-58c596c9d7-tdbdn` is Running but `ready=0/1` with no restarts. The container is up, but its readiness check keeps failing.
+  - **get_deployments:**
+    - The cache container runs with `args: ["--requirepass" "alpha-7f3k"]`.
+    - The api container uses `REDIS_PASSWORD="bravo-2m9q"`. Its readiness probe runs `redis-cli ... -a "$REDIS_PASSWORD" ping`, which only passes if the reply is `PONG`.
+    - The worker container uses `REDIS_PASSWORD="alpha-7f3k"` and is ready (1/1).
+    - Deployment `api` shows Available=False with reason MinimumReplicasUnavailable.
+  - **get_logs (api-58c596c9d7-tdbdn):** the log repeats `ERROR: cache rejected ping: AUTH failed: WRONGPASS invalid username-password pair or user is disabled.` and `NOAUTH Authentication required.`
+
+Deployments `cache` and `worker` are healthy and need no change.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3460 (uncached 1x)  out 724  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0362 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+There was one fault, and it's fixed.
+
+**Deployment/api**
+- **What was wrong:** api was using the wrong Redis password. The cache starts with `--requirepass alpha-7f3k`, but api had `REDIS_PASSWORD` set to `"bravo-2m9q"`. Every ping was rejected with `WRONGPASS invalid username-password pair`, so the readiness check failed and the pod stayed at 0/1 ready. The worker, which uses `alpha-7f3k`, was healthy. That shows the cache side was fine and only api was wrong.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}`
+- **Rollout result:** "complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s." The new pod, api-675754565f-g95ld, is Running and 1/1 ready.
+
+I didn't change cache or worker, because both were healthy.
+
+**The namespace is now healthy.** api, cache and worker are all Running and ready. The old api pod was still shutting down when the rollout finished.
+
+------------TOTAL METRICS------------
+
+steps 4  in 6302 (uncached 1x)  out 800  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0526 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault: `deployment/api` has the wrong cache hostname.**
+
+- **Object:** `deployment/api` (container `api`)
+- **Field:** `env CACHE_HOST` is `"redis"`.
+- **Fix:** Change `CACHE_HOST` to `"cache"`, the value `deployment/worker` uses successfully. The new pod template will roll out a replacement api pod.
+- **Evidence:**
+  - get_pods: `api-fdf7c5c48-6kfqr` is Running with ready=0/1. The other two pods are ready.
+  - get_deployments: `api` is Available=False (MinimumReplicasUnavailable) with `CACHE_HOST=redis`. `worker` uses `CACHE_HOST=cache` with the same probe and is Available=True and ready.
+  - get_events: the readiness probe fails with `nc: bad address 'redis'` (repeated).
+  - get_logs on the api pod: `nc: bad address 'redis'` and `ERROR: cannot reach cache at redis:6379`, repeated.
+
+**Caveat:** I had no tool to list Services. The conclusion that `cache` is the resolvable name rests on the worker pod being ready with `CACHE_HOST=cache`, and on the name `redis` failing DNS. Before changing the value, confirm with `kubectl get svc -n k8s-reconcile-service-name` that a Service named `cache` exists on port 6379.
+
+The `redis` pod itself is healthy (ready=1/1, no restarts, no warning events), so it is not the fault.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3868 (uncached 1x)  out 1020  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0011 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+The namespace is healthy now. There was one fault, in the `api` Deployment.
+
+**Fault: `deployment/api` could not reach its cache**
+- **What was wrong:** The api container had `CACHE_HOST=redis`. That name does not resolve in the namespace, so the readiness probe failed with `nc: bad address 'redis'` and the pod stayed at 0/1. The `worker` Deployment uses `CACHE_HOST=cache` on the same port, and it was healthy throughout. Redis itself was running and fine.
+- **Patch applied:** Changed the api container's `CACHE_HOST` from `redis` to `cache`, leaving `CACHE_PORT=6379` unchanged. The probe and command were not touched.
+- **Rollout result:** apply_patch reported the rollout complete: the new pod stayed up for 10 seconds without restarting, and 1 of 1 pods was available. The new pod `api-6978fd4c7-jnhps` is now Running 1/1 with no restarts and logs `cache ok`. The old pod `api-fdf7c5c48-2bw8j` was terminating and at 0/1.
+
+**Other workloads:** `redis` and `worker` were already healthy, so I left them alone.
+
+**Caveat:** I did not list Services, so I have not confirmed directly that a Service named `cache` exists. The evidence is that the worker resolves `cache` and reports `cache ok`, and the api now does the same.
+
+------------TOTAL METRICS------------
+
+steps 5  in 14432 (uncached 1x)  out 1532  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0025 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"},{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Field:** env `CACHE_HOST`. Its current value is `"redis"`, which does not resolve to any address in this namespace.
+- **Fix:** Change `CACHE_HOST` to `"cache"`, the host name the healthy worker uses.
+- **Evidence:**
+  - get_logs on api-fdf7c5c48-wsts8 repeats `nc: bad address 'redis'` and `ERROR: cannot reach cache at redis:6379`.
+  - get_pods shows api at `ready=0/1`. Its readiness probe runs the same `nc -z $CACHE_HOST $CACHE_PORT` check, so it fails too.
+  - get_deployments shows deployment/worker uses the same image, script and probe, with `CACHE_HOST="cache"` and port 6379, and it is `ready=1/1`. That means a cache Service named `cache` resolves and answers on 6379. The only difference between the two is the host name.
+  - I can't list Services with these tools, so I'm inferring the Service name from the worker working, not reading it directly.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2788 (uncached 1x)  out 540  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0298 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+There was one fault, and it is fixed.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** The api container was set to reach the cache at `CACHE_HOST=redis`, but the name `redis` doesn't resolve in the namespace. The pod logs showed `nc: bad address 'redis'` / `ERROR: cannot reach cache at redis:6379`. Because the readiness check runs the same `nc` command, the pod stayed at 0/1 ready. The healthy worker deployment uses `CACHE_HOST=cache` with the same port 6379 and logs `cache ok`, so the cache's address is `cache`. The Redis deployment's name doesn't match that address.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and it stayed up without restarting for 10s. The new pod `api-6978fd4c7-w2hb4` is Running and 1/1 ready, and the old pod was terminating.
+
+I didn't change the readiness check, and I didn't touch the redis or worker deployments because they were already healthy.
+
+**The namespace is now healthy:** api, redis and worker are all Running and 1/1 ready.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5290 (uncached 1x)  out 893  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0407 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1: api cannot reach cache because of a port mismatch**
+
+- **Faulty object:** `deployment/api` (container `api`) and `deployment/cache` (container `cache`)
+- **Wrong field:** `deployment/api` env `CACHE_PORT` is `"6379"`. `deployment/cache` runs `redis:7.4` with `args: ["--port" "6380"]`, so the cache is configured to listen on 6380, not 6379.
+- **Fix:** Make the two agree. The simplest change is to set `CACHE_PORT` to `"6380"` on `deployment/api`. Alternatively, remove the `--port 6380` override from `deployment/cache` so Redis uses its default 6379. The `containerPort` of 6379 on the cache is also misleading and should match whichever port is chosen.
+- **Evidence:**
+  - get_deployments: the api env `CACHE_PORT=6379`, the cache args `--port 6380`, and the api readiness probe is `nc -z cache 6379`.
+  - get_pods: `api-6bdd974567-6zjzh` is Running with ready=0/1, and the cache pod is Running with ready=1/1. The cache is healthy, so the fault is the mismatch and not the cache itself.
+  - get_logs: the api logs repeat `ERROR: cannot reach cache at cache:6379`.
+  - get_events: the api readiness probe failure repeats, and the deployment shows Available=False with MinimumReplicasUnavailable.
+
+The 6380 listening port is inferred from the cache's `--port` argument. I did not read the cache's own logs to confirm it.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2717 (uncached 1x)  out 963  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0008 (claude-haiku-5-5)
+
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1: Port mismatch between the cache and api deployments**
+
+- **Faulty object:** `deployment/cache` (container `cache`), which is the root cause. `deployment/api` is the victim.
+- **Field and current value:** `args: ["--port" "6380"]`. Redis listens on 6380, but the api is configured to reach it on 6379 (`CACHE_PORT: "6379"` in `deployment/api`, and `port: 6379/TCP` on the cache container).
+- **Fix:** Make the two agree. The simplest change is to remove the `--port 6380` override from the cache args so Redis uses its default 6379, or to set `CACHE_PORT` in `deployment/api` to `6380` and update the cache container port to match. Either way, the cache's listening port and the api's `CACHE_PORT` need to be the same.
+- **Evidence:**
+  - `get_deployments`: cache args `--port 6380`; api env `CACHE_PORT=6379`; api readiness probe runs `nc -z cache 6379`.
+  - `get_logs` on cache: "Running mode=standalone, port=6380", "Ready to accept connections tcp".
+  - `get_logs` on api: repeated "ERROR: cannot reach cache at cache:6379".
+  - `get_pods`: cache is 1/1 Running, while api is Running with ready=0/1 and no restarts. The failing readiness probe keeps the api pod out of service, so `deployment/api` shows Available=False.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2450 (uncached 1x)  out 796  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is not healthy yet. I fixed one fault, but the `api` pod still cannot reach the cache, and the remaining cause is outside what I can change or see.
+
+**Fault 1: `deployment/api`, wrong cache port**
+- **What was wrong:** `api` was configured with `CACHE_PORT=6379`. The `cache` Deployment starts redis with `--port 6380`, and its logs show `Running mode=standalone, port=6380`. Every `api` log line read `ERROR: cannot reach cache at cache:6379`.
+- **Patch applied:** set env `CACHE_PORT` to `"6380"` on container `api`. I left `deployment/cache` alone because it is healthy and the client was the side that did not match.
+- **Rollout result:** not finished after 1m30s. The new ReplicaSet pod `api-b587cc64c-2kjw8` is Running but 0/1 ready. Its logs now read `cannot reach cache at cache:6380`, so the port is now the expected one and the connection still fails.
+
+**Remaining fault: cache connectivity from `api`, not fixed**
+- `redis` is up and listening on 6380 (`cache-7554d5445f-zhjdh` is 1/1 ready), but `api` cannot connect to `cache:6380`.
+- The likeliest cause is that the hostname `cache` does not resolve to the cache pod, which would mean a missing or misconfigured Service. I could not confirm this: my tools cannot list Services, Endpoints or DNS, and I cannot exec into pods. I did not change `CACHE_HOST` because I have no verified alternative hostname, and inventing one would be guessing.
+- A secondary inconsistency: the `cache` container declares `containerPort: 6379` but redis serves 6380. This does not break the readiness check, but a Service targeting 6379 would fail the same way. I did not change it because the cache Deployment is healthy.
+
+**Next step for a human:** check that a Service named `cache` exists in `k8s-reconcile-cache-port`, that its selector matches the cache pod, and that its targetPort is 6380. If it is missing or wrong, it needs fixing outside this tool set. Once `cache` resolves, the `api` pod should become ready without further changes.
+
+------------TOTAL METRICS------------
+
+steps 6  in 17430 (uncached 1x)  out 2614  cache_write 2039 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0034 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6380"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/cache
+- **Wrong field:** the `cache` container's `args` is set to `["--port" "6380"]`. This makes Redis listen on 6380, but the container declares `port: 6379/TCP`, and the api connects to `CACHE_PORT=6379`.
+- **Fix:** Remove the `--port 6380` args so Redis uses its default port, 6379. Setting them to `["--port" "6379"]` also works. Either way, Redis will listen on the port the container declares and the api expects.
+- **Evidence:**
+  - get_deployments: cache has `args: ["--port" "6380"]` and `port: 6379/TCP`. The api has `CACHE_HOST=cache` and `CACHE_PORT=6379`, and its readiness probe runs `nc -z cache 6379`.
+  - get_logs on cache-7554d5445f-dvq2m: `Running mode=standalone, port=6380.`
+  - get_logs on api-6bdd974567-kx5nd: repeated `ERROR: cannot reach cache at cache:6379`.
+  - get_pods: api-6bdd974567-kx5nd is Running but ready=0/1, because its readiness probe fails. deployment/api reports Available=False.
+
+I couldn't see the `cache` Service, so I haven't checked its port settings. The api errors are consistent with the Service sending 6379 to a pod that only listens on 6380.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2364 (uncached 1x)  out 697  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0313 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+I fixed one fault, and the namespace is now healthy.
+
+**Fault 1: Deployment/cache**
+- **What was wrong:** Redis was started with `args: ["--port","6380"]`, so it listened on port 6380 (its log said `Running mode=standalone, port=6380`). But the deployment declares `containerPort: 6379`, and `api` connects to `cache:6379`. The cache pod looked ready, but nothing could reach it. That made `api`'s readiness probe (`nc -z cache 6379`) fail, and its log repeated `ERROR: cannot reach cache at cache:6379`, so `api` stayed at 0/1 ready.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}`. This makes Redis listen on the port the deployment declares and `api` expects. I didn't change `api`, whose settings were correct.
+- **Rollout result:** "rollout of deployment/cache complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s."
+
+**Namespace status:** healthy. Pods after the fix:
+- `api-6bdd974567-dxrrz`: 1/1 ready, no restarts
+- `cache-6d587c6cd7-8wp57`: 1/1 ready, no restarts
+
+------------TOTAL METRICS------------
+
+steps 4  in 4462 (uncached 1x)  out 1050  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0503 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault: `deployment/backend`, container `backend`, wrong listen port**
+
+- **Field and current value:** `args` runs `exec httpd -f -p 8081 -h /www`, while the container declares `port: 8080/TCP`.
+- **Fix:** Change the httpd argument to `-p 8080` so it matches the declared port. If 8081 is the intended port, change the declared port and the Service `targetPort` to 8081 instead. Either way the three values must agree.
+- **Evidence:**
+  - get_deployments: backend args use `-p 8081`, and the port is 8080/TCP.
+  - get_logs (backend): no output. httpd runs in the foreground with `-f`, so it logs nothing, and the container still reports Running.
+  - get_logs (frontend) and get_events: the frontend's readiness probe and its `wget http://backend/` both fail with "Connection refused" at 10.96.30.149. That is the backend's Service ClusterIP, so the Service is reachable but nothing accepts connections on the port it forwards to.
+
+**Consequence:** `frontend/frontend` is a victim, not a separate fault. Its `BACKEND_URL` (`http://backend/`) is correct, and its readiness probe fails for as long as the backend does not answer, so `frontend` stays at 0/1 and `Available=False`.
+
+**Limitation:** I could not read the Service object, so I have not confirmed its `targetPort`. The "Connection refused" pattern and the 8080/8081 mismatch are consistent with a Service targeting 8080, but that is an inference.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2984 (uncached 1x)  out 1061  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0010 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+I found one fault and fixed it. The namespace is healthy.
+
+**Fault: `Deployment/backend` had its server on the wrong port.**
+- **What was wrong:** The backend's `httpd` was started with `-p 8081`, but the deployment declares port 8080. The frontend reached the backend service and got "Connection refused", so its readiness probe failed and it stayed at 0/1. The backend pod was Running and Ready, but nothing was listening on the port the service targeted.
+- **Patch applied:** I changed the backend container's args from `httpd -f -p 8081 -h /www` to `httpd -f -p 8080 -h /www`. The rest of the template is unchanged.
+- **Rollout result:** The rollout completed. The new pod `backend-84d8b8595f-n6pmb` is Running, 1/1 ready, with no restarts. It stayed up for the settling period. The old pod was terminating. The frontend pod `frontend-86899448f4-77rpl` then showed Running, 1/1 ready.
+
+Limitation: I could not read the Service object, so I inferred that it targets 8080 from the "connection refused" error and the declared port. The frontend's readiness probe now passes, which confirms the inference.
+
+**Namespace state:** Both workloads are healthy. Backend is 1/1 and frontend is 1/1. I made no other changes.
+
+------------TOTAL METRICS------------
+
+steps 4  in 6195 (uncached 1x)  out 1576  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0015 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault: the backend listens on the wrong port**
+
+- **Object:** deployment/backend, container `backend`
+- **Wrong field:** the `args` start httpd with `exec httpd -f -p 8081 -h /www`, so it listens on **8081**. The container's declared port is **8080/TCP**, which is where traffic to the backend Service is expected.
+- **Fix:** change the httpd flag to `-p 8080` so it matches the declared port. Changing the Service's targetPort to 8081 should also work. I couldn't see the Service, so if you go that way, check its targetPort first.
+- **Evidence:**
+  - get_deployments: backend args say `-p 8081` but the port is `8080/TCP`. Frontend calls `BACKEND_URL=http://backend/`, and its readiness probe runs a wget against that same URL.
+  - get_logs (frontend-86899448f4-x67cc): every attempt fails with `wget: can't connect to remote host (10.96.158.170): Connection refused` / `ERROR: backend unavailable at http://backend/`. The name resolves to a Service IP, but nothing answers on the port it forwards to.
+  - get_pods: the frontend shows `ready=0/1` with no restarts, because its readiness probe fails the same way. The backend shows Ready only because it has no probe.
+
+The frontend deployment itself is configured correctly. It is unhealthy only because of the backend's port.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2115 (uncached 1x)  out 639  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0221 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+I fixed one fault, in the backend. The frontend was failing only because of it, so I didn't change the frontend.
+
+**Fault 1: Deployment/backend**
+- **What was wrong:** The container says it uses port 8080/TCP, but its start command ran `httpd -f -p 8081`, so the web server was listening on 8081. The frontend calls `http://backend/`, which resolved to 10.96.85.183, and every attempt was refused. That fits the Service forwarding traffic to 8080, where nothing was listening. I couldn't read the Service itself, so that part is inferred. The backend pod still showed as Ready because it has no readiness probe.
+- **Patch applied:** I changed the container's start command so httpd listens on 8080, the port it says it uses:
+  `{"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and it stayed up without restarting for 10s.
+
+**Deployment/frontend (symptom, not a fault):** It was at 0/1 Ready because its readiness check is a request to the backend, which kept getting "Connection refused". The check is testing the right thing, so I didn't change it. With no patch applied to it, `frontend-86899448f4-cq8gv` is now Running and 1/1 Ready.
+
+**The namespace is now healthy.** The new pod `backend-84d8b8595f-skd84` is 1/1 Ready, the frontend is 1/1 Ready, and the old backend pod is shutting down.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5668 (uncached 1x)  out 1188  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0481 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+**Fault: `deployment/api` has the wrong Redis password.**
+
+- **Faulty object:** `deployment/api` (container `api`)
+- **Wrong field:** `env REDIS_PASSWORD` is set to `bravo-2m9q`.
+- **Fix:** Change `REDIS_PASSWORD` to the password the cache actually requires, `alpha-7f3k`. Better, move it into a Secret and reference it from both deployments so they cannot drift apart. Then roll the api deployment.
+- **Evidence:**
+  - get_deployments: `deployment/cache` starts redis with `--requirepass alpha-7f3k`. `deployment/worker` uses the same password and is healthy (ready=1/1). `deployment/api` uses `bravo-2m9q`, and its readiness probe runs the same `redis-cli ping` check, which fails with that password.
+  - get_pods: `api-58c596c9d7-4jmtl` is Running with ready=0/1 and no restarts. This is consistent with a probe that never passes, not a crash. The deployment reports Available=False with MinimumReplicasUnavailable.
+
+The cache and worker are not faulty. I did not call get_events or get_logs, so the exact auth error text in the api container is unconfirmed. The password mismatch is still the only difference between the failing api and the working worker.
+
+------------TOTAL METRICS------------
+
+steps 2  in 1494 (uncached 1x)  out 685  cache_write 1456 (1.25x)  cache_read 1456 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+The namespace is healthy: all three workloads are running and ready, and the old api pod is terminating.
+
+**Fault: `Deployment/api` had the wrong Redis password.**
+- **What was wrong:** `REDIS_PASSWORD` was set to `bravo-2m9q`. The cache requires `alpha-7f3k`, which is the value the `cache` deployment starts with and the value `worker` uses successfully. The api logs showed `AUTH failed: WRONGPASS` on every attempt, and the readiness probe failed for the same reason.
+- **Patch applied:** set the `api` container's `REDIS_PASSWORD` env var to `alpha-7f3k`. The patch was strategic-merge on the env entry, so nothing else in the template changed.
+- **Rollout result:** apply_patch reported the rollout complete. The new pod `api-675754565f-qwfbn` is 1/1 ready, has no restarts, and stayed up for 10 seconds. The old pod `api-58c596c9d7-mq54v` is terminating.
+
+**Final state:** `cache` (1/1), `worker` (1/1) and `api` (1/1) are all healthy. The earlier "connection refused" messages in the events were from before the cache was reachable and did not recur.
+
+------------TOTAL METRICS------------
+
+steps 5  in 13102 (uncached 1x)  out 1090  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0022 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+One fault: the api deployment uses the wrong Redis password, so the cache rejects it and api never becomes ready.
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Field:** `env REDIS_PASSWORD`, currently the literal value `"bravo-2m9q"`.
+- **Fix:** Change it to the password cache actually requires, `"alpha-7f3k"`. Better still, have api, worker and cache all read the password from one shared Secret so they can't drift apart again.
+- **Evidence:**
+  - **get_deployments:** deployment/cache starts Redis with `--requirepass "alpha-7f3k"`. deployment/worker uses `REDIS_PASSWORD="alpha-7f3k"` and is ready 1/1. deployment/api uses `"bravo-2m9q"`. Its readiness probe runs `redis-cli ping` with that password and expects `PONG`.
+  - **get_pods:** `api-58c596c9d7-6wtxg` is Running but ready=0/1. The cache and worker pods are both ready 1/1.
+  - **get_logs (api-58c596c9d7-6wtxg):** the log repeats `AUTH failed: WRONGPASS invalid username-password pair or user is disabled.` and `NOAUTH Authentication required.` The single `Connection refused` at the very start is most likely from before cache finished starting. It isn't the ongoing fault.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3437 (uncached 1x)  out 680  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0352 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+I found one fault, in Deployment/api, and fixed it. The namespace is now healthy.
+
+**Fault: Deployment/api**
+- **What was wrong:** The api had the wrong Redis password. Its `REDIS_PASSWORD` was set to `bravo-2m9q`, but the cache server is started with `--requirepass alpha-7f3k`. The cache rejected every ping from the api (the logs show `WRONGPASS invalid username-password pair`), so the readiness check kept failing and the pod stayed at 0/1 ready. The worker uses `alpha-7f3k` and was working, which confirmed that's the password the cache expects.
+- **Patch applied:**
+  `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}`
+- **Rollout result:** Complete. The 1 pod running the new template is available and stayed up for 10s without restarting. The new pod `api-675754565f-6vdt9` is Running and 1/1 ready, and the old pod is terminating.
+
+**Namespace status:** Healthy. The api, cache and worker pods are all Running and 1/1 ready. I didn't touch the cache or worker deployments.
+
+One thing to look at later: the password is written directly into the deployment specs as a plain value rather than coming from a Secret. Moving it to a Secret would mean a Secret change, which I can't make from here.
+
+------------TOTAL METRICS------------
+
+steps 4  in 6293 (uncached 1x)  out 889  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0544 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault: `deployment/api` is pointing at a cache hostname that does not resolve.**
+
+- **Faulty object:** `deployment/api` (container `api`)
+- **Field and current value:** `env CACHE_HOST` = `"redis"` (value, not from a ConfigMap or Secret)
+- **Fix:** Change `CACHE_HOST` to the cache service name that resolves in this namespace. The worker deployment uses `"cache"` and is Ready, so `cache` is the likely correct name. Confirm the Service name before editing, because I could not list Services with the tools available. The api's probe and loop both use `$CACHE_HOST`, so no other field needs to change.
+- **Evidence:**
+  - get_pods: `api-fdf7c5c48-wr5n7` is Running with ready=0/1 and no restarts. The redis and worker pods are 1/1.
+  - get_deployments: `api` has `CACHE_HOST=redis`, `CACHE_PORT=6379`, and an exec readiness probe on `nc -z "$CACHE_HOST" "$CACHE_PORT"`. Its Available condition is False with MinimumReplicasUnavailable. `worker` uses `CACHE_HOST=cache` with the same probe and is Available.
+  - get_events: the api readiness probe repeatedly fails with `nc: bad address 'redis'`, which is a DNS lookup failure. There is also one probe timeout. The worker's probe failed once and then passed.
+  - get_logs (api): `nc: bad address 'redis'` followed by `ERROR: cannot reach cache at redis:6379`.
+
+The redis and worker deployments are healthy and have no fault. The redis deployment is running, so the failure is the name, not the redis workload itself.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3938 (uncached 1x)  out 1272  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0012 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+Namespace `k8s-reconcile-service-name` is healthy now. There was one fault, in `deployment/api`.
+
+**Fault: `deployment/api` pointed at the wrong cache hostname**
+- **Cause:** `CACHE_HOST` was `redis`. The api pod's logs showed `nc: bad address 'redis'`, so that name does not resolve from inside the namespace. The readiness probe failed for that reason, and the pod stayed at 0/1 ready.
+- **How I confirmed the right name:** the `worker` deployment uses `CACHE_HOST=cache`, and its logs show `cache ok`, so `cache` is the name that resolves to the cache.
+- **Patch applied:** set `CACHE_HOST` to `cache` on container `api`. `CACHE_PORT` stayed at `6379`, and the probe was not changed.
+- **Rollout result:** the rollout of `deployment/api` completed. The new pod `api-6978fd4c7-qcvj9` is 1/1 ready with no restarts, and it stayed up for the settling period. The old pod `api-fdf7c5c48-9n957` was terminating.
+
+**Final state:** `api`, `redis` and `worker` are all running and ready. `redis` and `worker` were already healthy and I did not change them. I did not check the api's own logs after the fix. The probe passing is the evidence that it reaches the cache.
+
+------------TOTAL METRICS------------
+
+steps 5  in 10572 (uncached 1x)  out 1339  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0021 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Wrong field:** env `CACHE_HOST`, current value `"redis"`. That name doesn't resolve in DNS, so the cache can't be reached through it.
+- **Fix:** set `CACHE_HOST` to `"cache"`. The healthy worker deployment already uses this value to reach the same Redis on port 6379.
+- **Evidence:**
+  - get_logs on pod api-fdf7c5c48-56dsh repeats `nc: bad address 'redis'` and `ERROR: cannot reach cache at redis:6379`.
+  - get_pods shows api at ready=0/1 with no restarts. The readiness probe runs the same `nc -z $CACHE_HOST $CACHE_PORT` check, so it keeps failing.
+  - get_deployments shows deployment/worker with `CACHE_HOST: "cache"` and `CACHE_PORT: "6379"`, and that pod is ready 1/1. The redis deployment is healthy and exposes port 6379.
+
+I couldn't list Services. My tools don't cover them, so the conclusion that the Service is named `cache` rests on the worker succeeding with that name. The other fix would be a Service named `redis` pointing at the redis pods, but changing api's env to match worker is the simpler change.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2785 (uncached 1x)  out 606  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0311 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+I found one fault, in the api deployment, and fixed it.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** api was trying to reach its cache at the hostname `redis`, but that name doesn't exist in DNS. Its logs repeated `nc: bad address 'redis'` / `ERROR: cannot reach cache at redis:6379`. Because of this, its readiness probe failed and the pod stayed at 0/1 ready. The worker deployment, which is healthy, uses `CACHE_HOST=cache` with the same port 6379, and its logs show `cache ok`. So the cache is reachable as `cache`, and `redis` is only the name of the deployment, not the address to use.
+- **Patch applied:** I changed only the `CACHE_HOST` value in api's pod template. The probe and command are unchanged.
+  `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template and 1 is available. The new pod `api-6978fd4c7-8cqnq` is Running and 1/1 ready, and stayed up for 10s without restarting. The old pod was terminating.
+
+I didn't change redis or worker, since both were already healthy.
+
+**The namespace is now healthy:** api, redis and worker are all Running and 1/1 ready.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5292 (uncached 1x)  out 913  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0411 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault: port mismatch between `api` and `cache`.**
+
+1. **Faulty object:** `deployment/cache`
+   - **Field:** `spec.template.spec.containers[cache].args` = `["--port", "6380"]`. Redis listens on 6380, but the port that `api` uses (6379) is the one exposed by the `cache` container.
+   - **Fix:** Change the args to `["--port", "6379"]`, or remove the override so Redis uses its default 6379. Alternatively, change `api`'s `CACHE_PORT` to `6380`. Either option makes the two sides agree. The first is preferred because the container's declared `port: 6379/TCP` already expects 6379.
+   - **Evidence:** get_deployments shows the cache args and the declared port 6379/TCP. get_logs on cache-7554d5445f-js9qf shows `Running mode=standalone, port=6380`.
+
+2. **Symptom object:** `deployment/api`
+   - **Field:** the readiness probe fails. The probe runs `nc -z -w 2 cache 6379`, and it has been failing with `Readiness probe failed` events. The pod is Running with ready=0/1, and the deployment has Available=False.
+   - **Fix:** this resolves once the cache listens on 6379 (see fault 1). The api deployment itself needs no change.
+   - **Evidence:** get_pods shows api ready=0/1 with no restarts. get_logs on api-6bdd974567-2vcg7 repeats `ERROR: cannot reach cache at cache:6379`. get_events shows repeated Unhealthy readiness failures for that pod.
+
+The cache pod is Ready and Redis starts cleanly, so the fault is only the port mismatch. No image, scheduling or resource problem was found.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3059 (uncached 1x)  out 888  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0008 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is healthy: the `api` and `cache` pods are both ready, and the current api pod's logs show "cache ok". One old api pod from the previous ReplicaSet is still terminating, which is expected.
+
+There was one fault, and it was in the `cache` Deployment. The `api` Deployment was only the symptom.
+
+**1. `deployment/cache`: Redis was started on the wrong port.**
+- **What was wrong:** The container ran `redis-server` with `args: ["--port", "6380"]`, so it listened on 6380. Everything else in the namespace expected 6379: the api's `CACHE_PORT` was 6379, the container declared `port: 6379`, and 6379 is Redis's default.
+- **Patch:** Changed the args to `["--port", "6379"]`.
+- **Rollout result:** Complete. 1 of 1 pods updated, available, and stable for 10s. The new pod is `cache-6d587c6cd7-lcr7s`.
+
+**2. `deployment/api`: a temporary change that I reverted.**
+- **What was wrong:** The api could not reach `cache:6379`, so its readiness probe failed. My first attempt changed `CACHE_PORT` to 6380 to match the cache's bad port. That was the wrong fix. The api's own config was correct, and the cache was the deviation.
+- **Patches:** First, `CACHE_PORT` set to 6380, which left the new pod unready because the `cache` Service still did not route to 6380. Then, `CACHE_PORT` restored to 6379, the original value.
+- **Rollout result:** Complete. 1 of 1 pods updated, available, and stable for 10s. The api now matches its original config, and the end state is the same as before my first patch.
+
+**Limitation:** I cannot read Services, so I inferred that the `cache` Service routes port 6379 to the pod. The logs confirm the fix: the api reports "cache ok" after the change.
+
+------------TOTAL METRICS------------
+
+steps 7  in 26378 (uncached 1x)  out 3048  cache_write 0 (1.25x)  cache_read 14273 (0.1x)
+cost $0.0043 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (3)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6380"}]}]}}}}
+2. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+3. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+I found one fault and fixed it.
+
+**Fault: Deployment/cache**
+- **What was wrong:** The cache container was started with `--port 6380`, so Redis listened on 6380 (its log said `Running mode=standalone, port=6380`). But the deployment declares port 6379, and the api is set up to connect to `cache:6379` (`CACHE_PORT=6379`). The api's log kept saying `ERROR: cannot reach cache at cache:6379`, and its readiness check, which tests the same connection, kept failing. So api showed 0/1 ready. The cache pod itself looked healthy, but it was listening on the wrong port.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}`. This makes Redis listen on the port the deployment declares and the api expects. I did not change the api deployment.
+- **Rollout result:** "rollout of deployment/cache complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s."
+
+**Result:** The namespace is now healthy. `api-6bdd974567-vsc94` is 1/1 ready and `cache-6d587c6cd7-wnrhv` is 1/1 ready, both with no restarts. The api pod became ready without being restarted, so it can now reach the cache.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5814 (uncached 1x)  out 1107  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0568 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault 1: `deployment/backend`, container `backend`, the listen port does not match the declared port**
+
+- **Field:** `args` sets `httpd -f -p 8081 -h /www`, but the container's declared port is `8080/TCP`.
+- **Fix:** Make the two agree. The simplest change is to run `httpd -f -p 8080 -h /www` so the process listens on the declared port. If the Service is meant to target 8081, change the Service's `targetPort` instead. I could not read the Service, so I can't say which side is intended.
+- **Evidence:** get_deployments shows the args and port. get_pods shows the backend pod Running with ready=1/1, so the process starts but is not listening where the Service sends traffic. The backend log is empty (get_logs), which is consistent with a server that started and is waiting for connections.
+
+**Fault 2 (symptom, not a separate cause): `deployment/frontend`, container `frontend`, not ready**
+
+- **Field:** The readiness probe runs `wget -q -T 2 -O /dev/null "$BACKEND_URL"` with `BACKEND_URL=http://backend/`. Every attempt fails.
+- **Fix:** None needed on the frontend. Once the backend listens on the port the Service targets, the probe should pass.
+- **Evidence:** get_pods shows frontend ready=0/1. get_events shows repeated readiness failures: `wget: can't connect to remote host (10.96.236.175): Connection refused`. get_logs shows `ERROR: backend unavailable at http://backend/` on every cycle. The backend Service IP resolves, but nothing accepts connections on the target port.
+
+**Root cause:** Fault 1. The backend's httpd listens on 8081 while the deployment declares 8080, so the frontend's connections to the backend Service are refused and the frontend never becomes ready.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3057 (uncached 1x)  out 1244  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0011 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+The backend's `httpd` now listens on port 8080, and the frontend has recovered.
+
+**Fault 1: `deployment/backend` had a port mismatch.**
+- **What was wrong:** The container declared port 8080, but its command ran `httpd -p 8081`, so the server listened on a port nothing was addressing. The `backend` Service's `http://backend/` calls were refused, as the frontend's logs showed.
+- **Patch applied:** Changed the container's args from `httpd -f -p 8081 -h /www` to `httpd -f -p 8080 -h /www`. The rest of the command is unchanged. I chose 8080 because it is the declared port. I could not read the Service spec, so I could not confirm its targetPort directly. The frontend recovering is the evidence that the Service now reaches the backend.
+- **Rollout result:** Complete. The new pod `backend-84d8b8595f-8w4gt` is Running, 1/1 ready, with no restarts, and it stayed up for the settling period. The old pod `backend-69b796f6fd-nlgpn` was terminating.
+
+**Frontend (no change made):** `deployment/frontend` was failing only because the backend was unreachable. Its pod `frontend-86899448f4-wkfp6` now reports 1/1 ready with no restarts, so it needed no change.
+
+**Namespace status:** Healthy. Both deployments are available, and the frontend's readiness probe passes. The only remaining item is the backend's old pod finishing termination.
+
+------------TOTAL METRICS------------
+
+steps 4  in 7220 (uncached 1x)  out 1777  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0017 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/backend, container `backend`
+- **What's wrong:** The server listens on the wrong port. The container args run `exec httpd -f -p 8081 -h /www`, but the container declares `port: 8080/TCP`. The backend Service at `http://backend/` (10.96.153.95) is refusing connections, so it is most likely sending traffic to 8080, where nothing is listening. I couldn't read the Service itself, so its targetPort is an inference.
+- **Fix:** Change the args to `httpd -f -p 8080 -h /www` so the server listens on the declared port.
+- **Evidence:**
+  - get_deployments: backend's args use `-p 8081` while its port is `8080/TCP`.
+  - get_logs on frontend-86899448f4-btvzb: `wget: can't connect to remote host (10.96.153.95): Connection refused` / `ERROR: backend unavailable at http://backend/`.
+  - get_events: repeated `Readiness probe failed: ... Connection refused` on the frontend pod.
+  - get_pods: frontend is `ready=0/1`. Backend shows `1/1` because it has no readiness probe, so the port mismatch never makes it look unhealthy.
+
+The frontend deployment itself is fine. It shows not-ready only because its readiness probe calls `$BACKEND_URL` and the backend doesn't answer.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2873 (uncached 1x)  out 661  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0256 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+I fixed the fault and the namespace is now healthy: frontend has gone from 0/1 to 1/1 ready.
+
+**Fault 1: Deployment/backend**
+- **What was wrong:** The backend container declares port 8080/TCP, but its command started httpd on port 8081 (`httpd -f -p 8081`). The frontend's calls to `http://backend/` reached the Service but were refused ("Connection refused"), so its readiness probe kept failing. I couldn't read the Service object with these tools. Refused connections while the backend pod was ready mean nothing was listening on the port the Service sends traffic to. The likely cause was the 8080/8081 mismatch, and the frontend becoming ready after the fix supports that.
+- **Patch applied:** I changed the backend's startup command so httpd listens on the declared port. The only edit was `-p 8081` to `-p 8080`:
+  `{"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template and are available, none from the old template are still running, and the new pod stayed up for 10s without restarting.
+
+**Deployment/frontend:** It was a symptom, not a separate fault, and I didn't change it. Its readiness probe was correctly checking whether the backend was reachable, and it now passes.
+
+**Namespace status:** Healthy. backend-84d8b8595f-sphqx and frontend-86899448f4-jhfv5 are both Running and 1/1 ready, with no restarts. The old backend pod was shutting down when I checked.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5554 (uncached 1x)  out 1144  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0467 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+**Fault: `deployment/api`, wrong cache password**
+
+- **Field:** `spec.template.spec.containers[api].env` `REDIS_PASSWORD`, currently the literal value `bravo-2m9q`.
+- **Fix:** Set `REDIS_PASSWORD` to the password the cache actually requires, `alpha-7f3k`. The `cache` deployment starts redis with `--requirepass alpha-7f3k`, and the working `worker` deployment uses that same value. Better still, move the value into a Secret and reference it from both `api` and `worker`, so the two cannot drift apart again.
+- **Evidence:**
+  - get_deployments: `api` has `REDIS_PASSWORD: bravo-2m9q`. `cache` runs with `--requirepass alpha-7f3k`. `worker` uses `alpha-7f3k` and is healthy.
+  - get_pods: `api-58c596c9d7-n7trb` is Running with ready=0/1. `cache` and `worker` are 1/1.
+  - get_deployments: `api` readiness probe runs `redis-cli ... ping` and expects `PONG`. With the wrong password it cannot get `PONG`, so the pod never becomes ready. This leaves `api` Available=False with MinimumReplicasUnavailable.
+
+I did not pull `api` logs or events. The `api` loop should print `ERROR: cache rejected ping: ...` (an auth error) if you want to confirm the cause at runtime.
+
+------------TOTAL METRICS------------
+
+steps 2  in 1494 (uncached 1x)  out 820  cache_write 1456 (1.25x)  cache_read 1456 (0.1x)
+cost $0.0008 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+The namespace is healthy now. One fault was found and fixed.
+
+**Fault: `deployment/api` had the wrong Redis password.**
+- **What was wrong:** The api container's `REDIS_PASSWORD` was `bravo-2m9q`. The `cache` deployment starts Redis with `--requirepass alpha-7f3k`, so the cache rejected every ping. The api logs showed `WRONGPASS` and `NOAUTH` errors, and the readiness probe kept failing. The `worker` deployment, which uses `alpha-7f3k`, was healthy the whole time, which points to the api's value as the outlier.
+- **Patch applied:** Set `REDIS_PASSWORD` to `alpha-7f3k` on the `api` container (a strategic merge patch on `spec.template`).
+- **Rollout result:** Reported complete. The new pod `api-675754565f-2txrs` is 1/1 ready with no restarts, and it stayed up for the settling period. The old pod `api-58c596c9d7-xbdtk` was terminating.
+
+**Final pod state:** `api-675754565f-2txrs`, `cache-8f5687795-k54z9` and `worker-7d49cb8697-lspf8` are all Running and 1/1 ready.
+
+**Things to be aware of:**
+- The Redis password is stored as a plain env value in the Deployment spec, not in a Secret. Both the cache and the api/worker use the same plaintext value, which is a security weakness. I did not change this, because moving it to a Secret is outside what I can do here.
+- The earlier "Connection refused" readiness failures on `api` and `worker` were transient, from before the cache was accepting connections. They are not part of the current state.
+
+------------TOTAL METRICS------------
+
+steps 5  in 14259 (uncached 1x)  out 1302  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0024 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+One fault: the api deployment has the wrong Redis password, so the cache rejects it and api never becomes ready.
+
+**deployment/api**
+- **Field:** `spec.template.spec.containers[api].env.REDIS_PASSWORD` is set to the literal value `"bravo-2m9q"`.
+- **Fix:** change it to `"alpha-7f3k"`, the password the cache is started with (`--requirepass alpha-7f3k` in deployment/cache). Both the readiness probe and the main loop use this variable, so the pod should become ready once it is corrected. A better long-term fix is to keep the password in one Secret that cache, api and worker all read from.
+- **Evidence:**
+  - get_pods: `api-58c596c9d7-2g7gv` is Running but `ready=0/1` with no restarts. cache and worker are both 1/1.
+  - get_deployments: deployment/api is `Available=False` (MinimumReplicasUnavailable). It sends `REDIS_PASSWORD="bravo-2m9q"`, but cache requires `alpha-7f3k`. Worker uses `alpha-7f3k` and is healthy.
+  - get_logs (api-58c596c9d7-2g7gv): every ping fails with `AUTH failed: WRONGPASS invalid username-password pair or user is disabled.` followed by `NOAUTH Authentication required.` The very first line was `Connection refused`. That looks like the cache was still starting up, because every later attempt reached Redis and was rejected for authentication.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3436 (uncached 1x)  out 662  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0348 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+I found one fault and fixed it.
+
+**Deployment/api**
+- **What was wrong:** The api container's `REDIS_PASSWORD` was set to `"bravo-2m9q"`, but the cache only accepts `"alpha-7f3k"` (set by its `--requirepass` argument). The api logs showed `WRONGPASS invalid username-password pair`, so the readiness probe kept failing and the pod stayed at 0/1 ready. The worker deployment already uses `"alpha-7f3k"` and is healthy, which confirms that's the right password.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, and it stayed up for 10s without restarting. The new pod `api-675754565f-txzvz` is Running and 1/1 ready.
+
+I didn't change cache or worker, since both were already healthy.
+
+**Namespace status:** Healthy. api, cache and worker are all Running and 1/1 ready. The old api pod was still shutting down when the rollout finished.
+
+**Follow-up:** The password is stored as plain text in the deployment specs. Moving it into a Secret would be safer, but I can't make that change with my tools.
+
+------------TOTAL METRICS------------
+
+steps 4  in 6238 (uncached 1x)  out 806  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0525 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault 1: `deployment/api` has the wrong cache hostname in its env.**
+
+- **Field:** `env CACHE_HOST` is `value "redis"`.
+- **Fix:** Change `CACHE_HOST` to `cache`, the hostname the working `worker` deployment uses. Then the api pod's readiness probe should pass. This assumes the Service that `cache` resolves to is the one fronting the redis pod, which I could not check directly (see below).
+- **Evidence:**
+  - get_pods: `api-fdf7c5c48-rp7q2` is Running with ready=0/1 and no restarts. The redis and worker pods are ready.
+  - get_deployments: `api` has `Available=False reason=MinimumReplicasUnavailable`. Its `CACHE_HOST` is `"redis"`. `worker` uses `CACHE_HOST="cache"` and is Available.
+  - get_logs (api pod): every check prints `nc: bad address 'redis'` followed by `ERROR: cannot reach cache at redis:6379`. The name `redis` does not resolve in this namespace.
+  - get_events: repeated `Unhealthy` warning on `pod/api-fdf7c5c48-rp7q2`, `Readiness probe failed: nc: bad address 'redis'`.
+
+**Not a fault:** `deployment/redis` (redis:7.4) and `deployment/worker` are healthy. The worker's readiness probe passes against `cache:6379`, which shows that name resolves in this namespace.
+
+**Limitation:** None of my tools list Services or Endpoints, so I did not confirm directly that `cache` routes to the redis pod. The evidence is the worker's passing probe against `cache:6379` and the api's failure on `redis`.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3981 (uncached 1x)  out 1165  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0012 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+The namespace is healthy now. There was one fault, in `deployment/api`.
+
+**Fault: `deployment/api` could not reach its cache**
+- **What was wrong:** The api container had `CACHE_HOST=redis`. The name `redis` does not resolve inside the namespace, so the readiness probe failed with `nc: bad address 'redis'` and the pod stayed at 0/1. The worker uses `CACHE_HOST=cache`, and its logs show `cache ok`, so `cache` is the name that works for the cache service. The redis deployment itself was healthy, so it was left alone.
+- **Patch applied:** I set `CACHE_HOST` to `cache` in the api container. `CACHE_PORT` stayed at `6379`. Nothing else in the template changed.
+- **Rollout result:** Complete. The new pod `api-6978fd4c7-726td` is 1/1 Running with no restarts and stayed up for 10s. The old pod `api-fdf7c5c48-shbhf` is terminating.
+
+**Final state:** `api`, `redis` and `worker` are all Running and ready, with no restarts. Nothing else needs a change.
+
+------------TOTAL METRICS------------
+
+steps 4  in 9596 (uncached 1x)  out 1265  cache_write 2039 (1.25x)  cache_read 6117 (0.1x)
+cost $0.0019 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api
+- **Wrong field:** container `api`, env `CACHE_HOST` = `"redis"`. No Service named `redis` resolves in this namespace.
+- **Fix:** Set `CACHE_HOST` to `"cache"`, the name the healthy worker uses.
+- **Evidence:**
+  - get_logs on api-fdf7c5c48-jd877 repeats `nc: bad address 'redis'` / `ERROR: cannot reach cache at redis:6379`. The name lookup itself fails.
+  - get_pods shows the api pod Running but ready=0/1, because its readiness probe runs the same `nc -z "$CACHE_HOST" "$CACHE_PORT"` check.
+  - get_deployments shows deployment/worker uses `CACHE_HOST: "cache"` with the same port 6379, and its pod is ready=1/1.
+- **Caveat:** My tools can't list Services, so I haven't seen the `cache` Service directly. I'm inferring it exists because the worker reaches `cache:6379` and passes the same probe.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2782 (uncached 1x)  out 531  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0296 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+I found one fault, in the api deployment, and fixed it. The new api pod is ready.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** The api container looks for the cache at the name set in `CACHE_HOST`, which was `"redis"`. That name doesn't resolve: its logs repeated `nc: bad address 'redis'` / `ERROR: cannot reach cache at redis:6379`. Its readiness probe runs the same check, so the pod stayed Running but never became ready (0/1). The worker deployment, which is healthy, reaches the cache on port 6379 using the name `"cache"` and logs `cache ok`. So the cache's address in this namespace is `cache`; `redis` is the name of the deployment behind it.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and the new pod stayed up for 10s without restarting. The new pod `api-6978fd4c7-bxd2q` is ready (1/1), and the old pod was terminating.
+
+I didn't change redis or worker, which were healthy and still are.
+
+**The namespace is now healthy:** api, redis and worker are all Running and ready 1/1 with no restarts.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5272 (uncached 1x)  out 893  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0406 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault: port mismatch between `api` and `cache`.**
+
+1. **Faulty object:** `deployment/cache`
+   - **Field:** `spec.template.spec.containers[cache].args` is `["--port", "6380"]`. Redis therefore listens on 6380, but the Service-facing port and the `api` configuration expect 6379 (the `cache` container's declared port is 6379/TCP).
+   - **Fix:** Change the args to `["--port", "6379"]`, or remove the override so Redis uses its default 6379. Then make sure the Service port (if any) also targets 6379.
+   - **Evidence:** get_deployments shows `args: ["--port" "6380"]` for cache and `port: 6379/TCP`. The cache pod is Running and ready=1/1, so Redis itself is up; it is simply on the wrong port.
+
+2. **Affected object:** `deployment/api` (symptom, not the cause)
+   - **Field:** None wrong. `CACHE_PORT=6379` and the readiness probe `nc -z cache 6379` are correct for the intended port. The probe fails because the cache is listening on 6380.
+   - **Evidence:**
+     - get_pods: `api-6bdd974567-tzvxz` Running, ready=0/1, no restarts.
+     - get_logs: repeated `ERROR: cannot reach cache at cache:6379`.
+     - get_events: repeated readiness probe failures for the api pod.
+     - get_deployments: `api` Available=False, MinimumReplicasUnavailable.
+
+No other faults were found. Both pods are scheduled and running, and no image-pull or missing-config errors appear in the events.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2687 (uncached 1x)  out 779  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is healthy. There was one fault, in `deployment/cache`.
+
+**Fault: `deployment/cache` started Redis on the wrong port.**
+- **What was wrong:** The container was started with `args: ["--port", "6380"]`, but its declared container port is 6379 and the `api` deployment connects to `cache:6379`. The api's readiness probe failed on every attempt, and its logs showed `ERROR: cannot reach cache at cache:6379`. The cache logs confirmed `Running mode=standalone, port=6380`.
+- **Patch applied:** Set the cache container's args to `["--port", "6379"]`. This matches the declared container port and the api's configuration. I did not change the api, because 6379 is the port the api and the cache's own port declaration both expect.
+- **Rollout result:** The rollout completed. The new cache pod `cache-6d587c6cd7-bvbvk` is 1/1 ready with no restarts, and it stayed up for 10 seconds. The api pod `api-6bdd974567-jb9bs` is now 1/1 ready with no restarts.
+
+The namespace is now healthy: both deployments are available and all pods are ready. No credentials or other values were missing, so nothing is left for you to supply.
+
+------------TOTAL METRICS------------
+
+steps 4  in 7187 (uncached 1x)  out 1444  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0015 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/cache
+- **Wrong field:** container `cache` args are `["--port" "6380"]`. Redis listens on 6380, but the container declares port 6379/TCP, and the api connects to `cache:6379`.
+- **Fix:** make Redis listen on 6379. Either remove the args or change them to `["--port" "6379"]`. The other option is to point the api at 6380 everywhere (api `CACHE_PORT`, the cache containerPort, and the Service's target port), but setting Redis back to 6379 is the smaller change.
+- **Evidence:**
+  - get_deployments: cache args are `--port 6380` while its port is 6379/TCP. The api has `CACHE_PORT=6379`, and its readiness probe runs `nc -z cache 6379`.
+  - get_logs on cache-7554d5445f-n7thk: "Running mode=standalone, port=6380."
+  - get_logs on api-6bdd974567-dzb4b: "ERROR: cannot reach cache at cache:6379", repeated.
+  - get_pods: api-6bdd974567-dzb4b is Running but ready=0/1, because its readiness probe fails.
+- **Not checked:** I have no tool that reads Services, so I could not see the `cache` Service's port or targetPort.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2378 (uncached 1x)  out 672  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0238 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+I fixed the problem with one patch to the cache deployment, and both pods are now ready.
+
+**Fault 1**
+- **Faulty object:** Deployment/cache
+- **What was wrong:** The cache container's args were `--port 6380`, so Redis was listening on 6380. Its own logs confirmed `port=6380`. But the deployment declares port 6379/TCP, and the api is set to connect to `cache:6379`. So the api could never reach the cache: its logs repeated "ERROR: cannot reach cache at cache:6379", and its readiness probe (`nc -z cache 6379`) kept failing, leaving api at 0/1 ready. The cache pod showed as healthy, but the problem was its wrong port setting, so that's where I made the fix. The api was set up correctly, so I didn't change it.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}`
+- **Rollout result:** "rollout of deployment/cache complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s." After the rollout, the api pod `api-6bdd974567-h2z4z` became ready (1/1) with no restarts.
+
+**Namespace status:** Healthy. Both api and cache are Running and ready (1/1) with no restarts.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5932 (uncached 1x)  out 1102  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0474 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault 1: `deployment/backend`, container `backend`, port mismatch between the server and its declared port**
+
+- **Wrong field:** `args` starts `httpd -f -p 8081 -h /www`, while the container declares `port: 8080/TCP`. The server listens on 8081, but the workload is declared, and the frontend is written to reach it, as 8080 or the default port 80.
+- **Fix:** Change the httpd argument to `-p 8080` so it matches the declared port, or change the declared port and any Service `targetPort` to 8081. Pick one value and make the Service `targetPort`, the container port and the httpd `-p` all agree.
+- **Evidence:**
+  - get_deployments: the backend args contain `-p 8081`, and the port is 8080/TCP.
+  - get_logs (frontend): repeated `wget: can't connect to remote host (10.96.139.46): Connection refused` and `ERROR: backend unavailable at http://backend/`.
+  - get_events: the frontend readiness probe failed with the same connection refused error.
+  - get_pods: the backend pod is Running and ready=1/1 with no restarts, so the server process itself is up. It is only on the wrong port.
+- **Caveat:** My tools cannot read Service objects, so I could not confirm the Service `targetPort`. The refused connection is consistent with a port mismatch but does not prove it alone.
+
+**Fault 2 (consequence, not a separate root cause): `deployment/frontend`, container `frontend`**
+
+- The frontend is Running with ready=0/1. Its readiness probe runs `wget` against `$BACKEND_URL` (`http://backend/`) and fails, so the Deployment reports Available=False.
+- No change is needed on the frontend itself. It should recover once the backend answers on the port the Service targets.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2972 (uncached 1x)  out 1303  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0010 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+The namespace is healthy. There was one fault, in the backend Deployment.
+
+**Fault: `deployment/backend` served HTTP on the wrong port**
+- **What was wrong:** The container's declared port is 8080, but its command started `httpd` on port 8081. Requests to the backend service were refused, so the frontend could not reach it. The frontend's readiness probe (`wget` against `$BACKEND_URL`) kept failing, so the frontend stayed at 0/1 and its log showed `ERROR: backend unavailable at http://backend/`.
+- **Patch applied:** Changed the backend's args from `httpd -f -p 8081 -h /www` to `httpd -f -p 8080 -h /www`. Everything else in the command was left as it was.
+- **Rollout result:** Complete. The new pod `backend-84d8b8595f-qfr22` is 1/1 Running with no restarts. The old pod `backend-69b796f6fd-m6d4x` is terminating.
+
+**Verification:** The frontend pod `frontend-86899448f4-2lwjf` is now 1/1 Running. Its log shows `backend ok`.
+
+I did not touch the frontend deployment, since its configuration was correct and the fault was on the backend side. I could not read the Service objects with the tools available. I inferred the 8080 target from the backend's declared port and the connection-refused errors, and the frontend's recovery confirms it.
+
+------------TOTAL METRICS------------
+
+steps 5  in 10794 (uncached 1x)  out 1549  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0020 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+**Fault: the backend's server listens on port 8081, but its declared port is 8080**
+
+- **Faulty object:** deployment/backend, container `backend`.
+- **Wrong field:** the startup args run `exec httpd -f -p 8081 -h /www`, so the server listens on **8081**. The container's declared port is **8080/TCP**.
+- **Fix:** change the args to `httpd -f -p 8080 -h /www` so the server listens on the declared port 8080.
+- **Evidence:**
+  - get_deployments shows the backend args use `-p 8081` while the declared port is `8080/TCP`. The frontend calls `BACKEND_URL=http://backend/` and its readiness probe runs `wget` against that URL.
+  - get_pods: the backend is Running and ready 1/1, which hides the problem because it has no readiness probe. The frontend is Running but ready 0/1.
+  - get_logs (frontend-86899448f4-rjmf4) repeats `wget: can't connect to remote host (10.96.217.155): Connection refused` / `ERROR: backend unavailable at http://backend/`.
+  - get_events repeats `Readiness probe failed: ... (10.96.217.155): Connection refused` for the frontend pod.
+
+"Connection refused" means the `backend` name resolves to 10.96.217.155, but nothing answers on the port that address forwards to. My tools can't show the Service, so I'm inferring that it forwards to 8080, the declared port. Once the backend listens on 8080, the frontend's readiness probe should pass. The frontend itself is not misconfigured; it only shows the symptom.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2847 (uncached 1x)  out 769  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0276 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-http-port 
+recreated k8s-reconcile-http-port, waiting 15s for it to settle
+
+I fixed the one fault in this namespace, and both workloads are now healthy.
+
+**Fault: Deployment/backend**
+- **What was wrong:** The container says it serves on port 8080, but its command started the web server (`httpd`) on port 8081. The frontend's requests to `http://backend/` were refused ("Connection refused" at 10.96.86.122), so its readiness probe kept failing and it never became ready (0/1). The backend still showed as ready because it has no probe of its own. I didn't read the Service object; that it sends traffic to 8080 is inferred from the refused connections and from the frontend recovering after this change.
+- **Patch applied:** I changed the server's listen port to the one the container declares, leaving everything else the same:
+  `{"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}`
+- **Rollout result:** Complete. The 1 new backend pod is running the new template, is available, and stayed up for 10s without restarting. No old pods were still running; the old one was shutting down.
+
+**Deployment/frontend** had nothing wrong with it; it was failing only because the backend was unreachable. I didn't change it. After the backend fix, the same frontend pod (`frontend-86899448f4-w2tgj`) became ready (1/1) without restarting.
+
+**Namespace status:** Healthy. `backend-84d8b8595f-qb4s2` and `frontend-86899448f4-w2tgj` are both Running and ready (1/1).
+
+------------TOTAL METRICS------------
+
+steps 4  in 5529 (uncached 1x)  out 1072  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0452 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/backend  {"spec":{"template":{"spec":{"containers":[{"name":"backend","args":["mkdir -p /www && echo ok > /www/index.html\nexec httpd -f -p 8080 -h /www\n"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+**Fault 1: `deployment/api`, container `api`**
+
+- **Wrong field:** `env REDIS_PASSWORD` is `"bravo-2m9q"`. The cache server and the working `worker` deployment use `"alpha-7f3k"`.
+- **Fix:** Set `REDIS_PASSWORD` to `alpha-7f3k`, or better, have both `api` and `cache` read the same Secret key so they cannot drift. Then roll out the api deployment.
+- **Evidence:**
+  - get_deployments: `cache` runs with `args: ["--requirepass" "alpha-7f3k"]`. `api` has `REDIS_PASSWORD: "bravo-2m9q"`, and its readiness probe is failing, so the deployment is `available=0`. `worker` has `REDIS_PASSWORD: "alpha-7f3k"` and is 1/1 ready.
+  - get_pods: `api-58c596c9d7-82r9v` is Running with ready=0/1 and no restarts. The probe is failing, not the container crashing.
+  - get_logs (api pod): repeated `AUTH failed: WRONGPASS invalid username-password pair` and `NOAUTH Authentication required`, which is the cache rejecting the wrong password.
+
+No other faults found. `cache` and `worker` are healthy. The one early `Connection refused` line in the api logs is from startup, before the cache was reachable, and does not recur.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3609 (uncached 1x)  out 783  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0010 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+The namespace is healthy. One fault was found and fixed.
+
+**Fault: `deployment/api` had the wrong Redis password.**
+- **What was wrong:** The api container's `REDIS_PASSWORD` was `bravo-2m9q`. The cache server requires `alpha-7f3k`, which is the value `deployment/cache` starts with and which the healthy `deployment/worker` uses. The api logs showed `AUTH failed: WRONGPASS` on every ping, and the readiness probe failed for the same reason, so the pod never became ready and the deployment never became available.
+- **Patch applied:** Changed the api container's `REDIS_PASSWORD` env value from `bravo-2m9q` to `alpha-7f3k`. Nothing else was changed, and the probe was left as it was.
+- **Rollout result:** apply_patch reported the rollout complete. The new pod `api-675754565f-k8zcj` is 1/1 ready with no restarts, and it stayed up for the settling period.
+
+**Current state:**
+- `api-675754565f-k8zcj`: Running, 1/1 ready.
+- `cache-8f5687795-s9kb2`: Running, 1/1 ready. Unchanged.
+- `worker-7d49cb8697-tpw47`: Running, 1/1 ready. Unchanged.
+- The old api pod `api-58c596c9d7-mp748` was still in Terminating when I last checked. It is being removed by the rollout and is not a separate fault.
+
+I did not inspect the `cache` deployment's password setting beyond what `get_deployments` shows. The fix relies on `cache` continuing to require `alpha-7f3k`, which it does now, since the cache pod is ready and api authenticates with that password.
+
+------------TOTAL METRICS------------
+
+steps 5  in 13055 (uncached 1x)  out 1225  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0023 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+There is one fault: the `api` deployment is using the wrong password for the Redis cache.
+
+**Fault 1**
+- **Object:** deployment/api, container `api`.
+- **Wrong field:** env `REDIS_PASSWORD` is set to the literal value `"bravo-2m9q"`. The cache only accepts `alpha-7f3k`, set by `--requirepass alpha-7f3k` in deployment/cache's args.
+- **Fix:** set `REDIS_PASSWORD` in deployment/api to `alpha-7f3k`. A better option is to have both api and worker read it from one shared Secret so the values can't drift apart again.
+- **Evidence:**
+  - get_pods: `api-58c596c9d7-gzz8x` is Running but shows ready=0/1 with no restarts. The container stays up and only the readiness check fails.
+  - get_deployments: api's readiness probe sends a `redis-cli ping` using `$REDIS_PASSWORD`. Cache requires `alpha-7f3k`. Worker uses `REDIS_PASSWORD="alpha-7f3k"` and is 1/1 ready; api uses `"bravo-2m9q"` and is not.
+  - get_logs (api-58c596c9d7-gzz8x): the same lines repeat: `AUTH failed: WRONGPASS invalid username-password pair or user is disabled.` and `NOAUTH Authentication required.` The single `Connection refused` at the top happened once at startup and didn't recur.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3435 (uncached 1x)  out 650  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0346 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-auth-mismatch 
+recreated k8s-reconcile-auth-mismatch, waiting 40s for it to settle
+
+I found one fault and fixed it.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** The api container sent the password `REDIS_PASSWORD="bravo-2m9q"`, but the cache only accepts `alpha-7f3k` (its args are `--requirepass alpha-7f3k`). The api logs showed the cache rejecting it every time with `AUTH failed: WRONGPASS invalid username-password pair`. Because of that, the readiness probe's `PING` never returned `PONG`, so the pod stayed at 0/1 ready. The healthy worker deployment already uses `alpha-7f3k`, which supports that this is the correct value.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template and 1 is available. The new pod `api-675754565f-w7kb6` is Running and 1/1 ready, and stayed up for 10s without restarting. The old pod was terminating.
+
+I didn't change cache or worker, which were already healthy.
+
+**The namespace is now healthy.** api, cache and worker are all Running and 1/1 ready.
+
+One thing to consider: the password is set as a plain value in both api and worker. Storing it in a Secret would be safer, but I can't create Secrets with the tools I have.
+
+------------TOTAL METRICS------------
+
+steps 4  in 6311 (uncached 1x)  out 873  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0541 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"REDIS_PASSWORD","value":"alpha-7f3k"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+**Fault: `deployment/api` has the wrong cache hostname.**
+
+- **Object:** `deployment/api` (container `api`)
+- **Field:** `env CACHE_HOST` is `value: "redis"`. The same value flows into the readiness probe, which runs `nc -z -w 2 "$CACHE_HOST" "$CACHE_PORT"`.
+- **Fix:** set `CACHE_HOST` to `cache`, the name the healthy `worker` deployment uses. The api pod should then pass its readiness probe and the deployment should become available. If the Service is actually meant to be named `redis`, create or rename it instead. Either way the name the api resolves must match an existing Service.
+- **Evidence:**
+  - get_pods: `api-fdf7c5c48-hlqp6` is Running with ready=0/1. The other pods are ready.
+  - get_deployments: `api` has Available=False (MinimumReplicasUnavailable), and `CACHE_HOST` is "redis". `worker` uses `CACHE_HOST` "cache" and is Available with its probe configured the same way.
+  - get_events: the readiness probe fails repeatedly with `nc: bad address 'redis'`. That is a DNS lookup failure, not a refused connection.
+  - get_logs (api pod): `nc: bad address 'redis'` followed by `ERROR: cannot reach cache at redis:6379` on every loop.
+
+**Not faulty:** `deployment/redis` is Available and its pod is 1/1 with no restarts. `deployment/worker` is healthy. The worker's readiness probe passes against `cache:6379`, which shows that the name `cache` resolves in this namespace. I did not list Services directly, so the claim that `cache` is the correct Service name rests on that probe result.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3968 (uncached 1x)  out 1306  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+The namespace is healthy now. One fault was found and fixed.
+
+**Fault: Deployment/api, wrong cache hostname**
+- **What was wrong:** The api container had `CACHE_HOST=redis`. Nothing in the namespace resolves to `redis`, so `nc` failed with `bad address 'redis'`. The readiness probe failed on every check, so the pod stayed at 0/1 and the deployment never became available. The worker uses `CACHE_HOST=cache` and reports `cache ok`, so the cache Service is named `cache`. The redis pod itself was healthy.
+- **Patch applied:** Set `CACHE_HOST` to `cache` on the `api` container. `CACHE_PORT` stayed `6379`. I did not change the probe or the command.
+- **Rollout result:** Complete. The new ReplicaSet `api-6978fd4c7` has one pod, `api-6978fd4c7-6w9hw`, which is 1/1 Ready with no restarts. It stayed up for 10 seconds. The old pod `api-fdf7c5c48-q8z7b` was terminating.
+
+**Final state:** `get_pods` shows `api-6978fd4c7-6w9hw`, `redis-54c5fc954d-qdj5c` and `worker-7d89ff5fbc-47z5f` all Running and 1/1 Ready. The old api pod is shutting down. Redis and worker were already healthy and were not changed.
+
+------------TOTAL METRICS------------
+
+steps 5  in 14033 (uncached 1x)  out 1393  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0024 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+One fault: the api pod points at a cache hostname that doesn't resolve.
+
+- **Object:** deployment/api, container `api`
+- **Wrong field:** `env CACHE_HOST`, currently `"redis"`. This name doesn't resolve in the cluster.
+- **Fix:** Set `CACHE_HOST` to `"cache"`, the value deployment/worker uses.
+- **Evidence:**
+  - **get_logs (api-fdf7c5c48-th2mn):** repeats `nc: bad address 'redis'` and `ERROR: cannot reach cache at redis:6379`.
+  - **get_pods:** the api pod is Running but `ready=0/1`. Its readiness probe runs the same `nc -z $CACHE_HOST $CACHE_PORT` check, so it keeps failing.
+  - **get_deployments:** worker has `CACHE_HOST="cache"` with the same port 6379 and the same probe, and it is `ready=1/1`. The redis deployment itself is healthy (`ready=1/1`, port 6379). So redis is running, and only api uses the wrong name for it.
+
+I couldn't list Services, so I haven't directly confirmed that a Service called `cache` exists. I'm inferring it from worker resolving and reaching `cache:6379`.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2783 (uncached 1x)  out 590  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0308 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-service-name 
+recreated k8s-reconcile-service-name, waiting 15s for it to settle
+
+There was one fault, and it's fixed.
+
+**Deployment/api**
+- **What was wrong:** The api container's `CACHE_HOST` was set to `"redis"`, but nothing in the namespace resolves under that name. The pod's logs repeated `nc: bad address 'redis'` / `ERROR: cannot reach cache at redis:6379`, so its readiness probe kept failing and it stayed at 0/1 ready. The healthy worker deployment reaches the cache with `CACHE_HOST="cache"`, port 6379, and logs `cache ok`. So the right cache name is `cache`, not the deployment name `redis`.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template and 1 is available. No pods from the old template are still running, and the new pod stayed up for 10s without restarting. The new pod `api-6978fd4c7-tq2q6` is Running and 1/1 ready, and the old pod was terminating.
+
+I didn't touch redis or worker, which were already healthy. I left the probe alone too: it was correctly reporting that the cache couldn't be reached.
+
+**The namespace is now healthy:** api, redis and worker are all Running and 1/1 ready.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5265 (uncached 1x)  out 878  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0403 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_HOST","value":"cache"}]}]}}}}

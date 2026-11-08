@@ -22,7 +22,7 @@ import (
 	"github.com/zaansaeed/k8s-reconcile/internal/tools"
 )
 
-type run struct {
+type runRecord struct {
 	Time      time.Time
 	Scenario  string
 	Model     string
@@ -35,7 +35,7 @@ type run struct {
 	PodsAfter string
 }
 
-type grade struct {
+type gradeRecord struct {
 	Run      time.Time
 	Scenario string
 	Model    string
@@ -49,131 +49,131 @@ type grade struct {
 
 func main() {
 	runsPath := flag.String("runs", "results/runs.jsonl", "runs to grade")
-	outPath := flag.String("out", "results/grades.jsonl", "where grades are appended; runs already graded here are skipped")
-	model := flag.String("model", "opus", "judge model")
-	only := flag.String("only", "", "comma-separated scenarios to grade; all when empty")
-	show := flag.Bool("show", false, "print the judge's input for the first matching run and exit, without calling the API")
+	gradesPath := flag.String("out", "results/grades.jsonl", "where grades are appended; runs already graded here are skipped")
+	judgeModel := flag.String("model", "opus", "judge model")
+	onlyScenarios := flag.String("only", "", "comma-separated scenarios to grade; all when empty")
+	showInput := flag.Bool("show", false, "print the judge's input for the first matching run and exit, without calling the API")
 	flag.Parse()
 
-	graded := map[time.Time]bool{}
-	for _, g := range readLines[grade](*outPath) {
-		if g.Error == "" {
-			graded[g.Run] = true
+	alreadyGraded := map[time.Time]bool{}
+	for _, existing := range readLines[gradeRecord](*gradesPath) {
+		if existing.Error == "" {
+			alreadyGraded[existing.Run] = true
 		}
 	}
-	var out *os.File
-	if !*show {
+	var gradesFile *os.File
+	if !*showInput {
 		var err error
-		if out, err = os.OpenFile(*outPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err != nil {
+		if gradesFile, err = os.OpenFile(*gradesPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err != nil {
 			log.Fatal(err)
 		}
-		defer out.Close()
+		defer gradesFile.Close()
 	}
 
-	client := llm.New(llm.DefaultConfig(rubric, *model), []tools.Spec{gradeTool})
-	total := telemetry.Run{Model: client.Model()}
-	for _, r := range readLines[run](*runsPath) {
-		if graded[r.Time] || (*only != "" && !slices.Contains(strings.Split(*only, ","), r.Scenario)) {
+	judgeClient := llm.New(llm.DefaultConfig(rubric, *judgeModel), []tools.Spec{gradeTool})
+	judgeTotals := telemetry.Run{Model: judgeClient.Model()}
+	for _, run := range readLines[runRecord](*runsPath) {
+		if alreadyGraded[run.Time] || (*onlyScenarios != "" && !slices.Contains(strings.Split(*onlyScenarios, ","), run.Scenario)) {
 			continue
 		}
-		if *show {
-			prompt, err := input(r)
+		if *showInput {
+			prompt, err := judgeInput(run)
 			if err != nil {
 				log.Fatal(err)
 			}
 			fmt.Println(prompt)
 			return
 		}
-		g := judge(client, r)
-		total.Record(g.Usage)
-		line, _ := json.Marshal(g)
-		out.Write(append(line, '\n'))
-		fmt.Printf("%s %s %s: %s%s\n", r.Scenario, r.Model, r.Mode, overall(g.Grade), g.Error)
+		record := gradeRun(judgeClient, run)
+		judgeTotals.Record(record.Usage)
+		line, _ := json.Marshal(record)
+		gradesFile.Write(append(line, '\n'))
+		fmt.Printf("%s %s %s: %s%s\n", run.Scenario, run.Model, run.Mode, overallVerdict(record.Grade), record.Error)
 	}
-	cost, _ := total.CostUSD()
-	fmt.Printf("\njudge cost $%.4f  %s\n", cost, total.UsageLine(total.Usage))
+	totalCost, _ := judgeTotals.CostUSD()
+	fmt.Printf("\njudge cost $%.4f  %s\n", totalCost, judgeTotals.UsageLine(judgeTotals.Usage))
 }
 
-func judge(client *llm.Client, r run) grade {
-	g := grade{Run: r.Time, Scenario: r.Scenario, Model: r.Model, Mode: r.Mode, Judge: client.Model()}
-	prompt, err := input(r)
+func gradeRun(judgeClient *llm.Client, run runRecord) gradeRecord {
+	record := gradeRecord{Run: run.Time, Scenario: run.Scenario, Model: run.Model, Mode: run.Mode, Judge: judgeClient.Model()}
+	prompt, err := judgeInput(run)
 	if err != nil {
-		g.Error = err.Error()
-		return g
+		record.Error = err.Error()
+		return record
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	reply, err := client.Send(ctx, []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))})
+	reply, err := judgeClient.Send(ctx, []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))})
 	if err != nil {
-		g.Error = err.Error()
-		return g
+		record.Error = err.Error()
+		return record
 	}
-	g.Usage = reply.Usage
-	cost := telemetry.Run{Model: client.Model()}
-	cost.Record(reply.Usage)
-	g.CostUSD, _ = cost.CostUSD()
+	record.Usage = reply.Usage
+	callCost := telemetry.Run{Model: judgeClient.Model()}
+	callCost.Record(reply.Usage)
+	record.CostUSD, _ = callCost.CostUSD()
 	if len(reply.Calls) != 1 || reply.Calls[0].Name != gradeTool.Name {
-		g.Error = "judge did not call record_grade: " + reply.Text
-		return g
+		record.Error = "judge did not call record_grade: " + reply.Text
+		return record
 	}
-	g.Grade = reply.Calls[0].Input
-	return g
+	record.Grade = reply.Calls[0].Input
+	return record
 }
 
-func input(r run) (string, error) {
-	manifest, err1 := os.ReadFile(filepath.Join("scenarios", r.Scenario+".yaml"))
-	truth, err2 := os.ReadFile(filepath.Join("scenarios", "truths", r.Scenario+".yaml"))
-	if err := errors.Join(err1, err2); err != nil {
+func judgeInput(run runRecord) (string, error) {
+	manifest, manifestErr := os.ReadFile(filepath.Join("scenarios", run.Scenario+".yaml"))
+	truth, truthErr := os.ReadFile(filepath.Join("scenarios", "truths", run.Scenario+".yaml"))
+	if err := errors.Join(manifestErr, truthErr); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("<manifest>\n%s</manifest>\n\n<truth>\n%s</truth>\n\n<transcript>\n%s</transcript>", manifest, truth, transcript(r)), nil
+	return fmt.Sprintf("<manifest>\n%s</manifest>\n\n<truth>\n%s</truth>\n\n<transcript>\n%s</transcript>", manifest, truth, transcript(run)), nil
 }
 
-func transcript(r run) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "mode: %s\n", r.Mode)
-	for _, s := range r.Steps {
-		fmt.Fprintf(&b, "\n--- step %d\n", s.N)
-		if t := strings.TrimSpace(s.Text); t != "" && len(s.Calls) > 0 {
-			fmt.Fprintf(&b, "agent: %s\n", t)
+func transcript(run runRecord) string {
+	var text strings.Builder
+	fmt.Fprintf(&text, "mode: %s\n", run.Mode)
+	for _, step := range run.Steps {
+		fmt.Fprintf(&text, "\n--- step %d\n", step.N)
+		if narration := strings.TrimSpace(step.Text); narration != "" && len(step.Calls) > 0 {
+			fmt.Fprintf(&text, "agent: %s\n", narration)
 		}
-		for _, c := range s.Calls {
-			fmt.Fprintf(&b, "call %s %s\nresult:\n%s\n", c.Name, c.Input, c.Output)
+		for _, call := range step.Calls {
+			fmt.Fprintf(&text, "call %s %s\nresult:\n%s\n", call.Name, call.Input, call.Output)
 		}
 	}
 	switch {
-	case r.Error != "":
-		fmt.Fprintf(&b, "\nrun ended with an error: %s\n", r.Error)
-	case r.Exhausted:
-		b.WriteString("\nrun hit its step limit without answering\n")
+	case run.Error != "":
+		fmt.Fprintf(&text, "\nrun ended with an error: %s\n", run.Error)
+	case run.Exhausted:
+		text.WriteString("\nrun hit its step limit without answering\n")
 	default:
-		fmt.Fprintf(&b, "\n--- final answer\n%s\n", r.Answer)
+		fmt.Fprintf(&text, "\n--- final answer\n%s\n", run.Answer)
 	}
-	if r.Mode == "repair" {
-		fmt.Fprintf(&b, "\n--- patches that reached the cluster: %d\n", len(r.Patches))
-		for _, p := range r.Patches {
-			fmt.Fprintf(&b, "%s/%s %s\n", strings.ToLower(p.Kind), p.Name, p.Patch)
+	if run.Mode == "repair" {
+		fmt.Fprintf(&text, "\n--- patches that reached the cluster: %d\n", len(run.Patches))
+		for _, patch := range run.Patches {
+			fmt.Fprintf(&text, "%s/%s %s\n", strings.ToLower(patch.Kind), patch.Name, patch.Patch)
 		}
-		fmt.Fprintf(&b, "\n--- pods right after the run\n%s", r.PodsAfter)
+		fmt.Fprintf(&text, "\n--- pods right after the run\n%s", run.PodsAfter)
 	}
-	return b.String()
+	return text.String()
 }
 
-func overall(raw json.RawMessage) string {
-	var g struct{ Overall string }
-	json.Unmarshal(raw, &g)
-	return g.Overall
+func overallVerdict(gradeJSON json.RawMessage) string {
+	var parsed struct{ Overall string }
+	json.Unmarshal(gradeJSON, &parsed)
+	return parsed.Overall
 }
 
 func readLines[T any](path string) []T {
-	f, err := os.Open(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer file.Close()
 	var items []T
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(file)
 	scanner.Buffer(nil, 16<<20)
 	for scanner.Scan() {
 		var item T

@@ -1,0 +1,22 @@
+namespace: k8s-reconcile-http-port
+tier: 4
+faults:
+  - object: deployment/backend
+    field: spec.template.spec.containers[backend].args
+    current: httpd started with -p 8081, while the container declares port 8080
+    fix: start httpd on 8080, the port the container declares and the Service sends traffic to
+    repairable: true
+    evidence: 'get_logs on frontend shows "ERROR: backend unavailable at http://backend/"; get_events shows frontend''s readiness probe getting "Connection refused"; get_deployments shows backend running httpd -p 8081 while declaring port 8080/TCP; backend''s own log is empty'
+    partial:
+      - names the port mismatch but fixes it on the frontend side
+      - changes backend's declared containerPort to 8081 without changing what httpd listens on
+    wrong:
+      - points frontend's BACKEND_URL at port 8081; the backend Service only forwards to 8080, so frontend stays unready
+      - reports backend as healthy and blames frontend, DNS or the network
+      - removes or loosens frontend's readiness probe
+not_faults:
+  - object: deployment/frontend
+    note: unready only because backend is not listening where the Service sends traffic; its spec is correct
+expect_after_repair:
+  deployment/backend: healthy
+  deployment/frontend: healthy

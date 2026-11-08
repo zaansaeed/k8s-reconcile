@@ -122,45 +122,58 @@ Each scenario runs in its own namespace. The tiers rise with how much reasoning 
 |---|---|---|---|
 | `bad-image` | 1 | Image tag doesn't exist | Reading a pull error from events |
 | `crashloop` | 1 | Startup script exits because `DATABASE_URL` is unset | Not inventing a value it can't know: the correct outcome is a report, not a patch |
-| `readiness-probe` | 2 | Readiness probe on port 8080; nginx listens on 80 | Comparing the spec against the symptom |
 | `unschedulable` | 2 | 64Gi memory request on a small node | Reading scheduler events for a pod that never started |
 | `liveness-probe` | 3 | Liveness probe on `/healthz`, which nginx returns 404 for | A restart loop that looks like a crash but is the kubelet killing a healthy app |
 | `multi-fault` | 3 | Bad image tag hiding a missing env var, a wrong probe port, and a healthy decoy | Several faults at once, one only visible after another is fixed, and leaving the healthy Deployment alone |
 | `slow-start` | 4 | App sleeps 15s before listening; the liveness probe kills it at 2s | The same "connection refused" as a wrong port, but the port is fine and the cause is timing |
-| `env-typo` | 4 | Env var spelled `DATABSE_URL`, with the right value | Looks like `crashloop`'s unfixable fault, but this one is repairable |
-| `noisy` | 4 | One bad probe path among 8 Deployments | Finding one fault in long output, and leaving red herrings (a one-time restart, `ERROR` lines in healthy logs) alone |
 | `cache-port` | 4 | Redis runs with `--port 6380`; the client and Service use 6379 | The cause is in a healthy-looking Deployment, and the error message shows the *correct* port |
 | `client-port` | 4 | The client is set to port 6380; Redis is correct on 6379 | The mirror of `cache-port`: here the fix is on the client |
 | `chain` | 4 | `db` binds to 127.0.0.1, so `api` can't reach it and `web` can't reach `api` | Following a symptom back two hops; removing a probe would turn every pod green while `db` is still broken |
 | `wrong-host` | 4 | The client points at `postgres`; the database Deployment is `db` | Taking the right value from another object instead of inventing one |
+| `http-port` | 4 | The backend runs `httpd -p 8081` but declares 8080, and its Service forwards to 8080 | Like `cache-port`, but the server's log is empty, so only the spec shows which side is wrong |
+| `auth-mismatch` | 4 | The client's Redis password doesn't match the server's; a second client uses the right one | Two equally easy fixes, but changing the server's password locks out the healthy client |
+| `service-name` | 4 | The client uses the Deployment's name `redis`; the Service is named `cache`, which a healthy client uses | The Deployment name, right in `wrong-host`, is the wrong answer here; the healthy peer has the right one |
+
+`http-port`, `auth-mismatch` and `service-name` were built to test whether `cache-port`'s difficulty came from its two-sided shape. They didn't separate the models (see below), which narrowed down what makes `cache-port` hard. Three earlier scenarios, which every model solved and which overlapped with others, are kept in `scenarios/retired/` so their past runs remain explainable.
 
 ## Results so far
 
-90 runs: 13 scenarios, Claude Haiku 5.5 and Opus 5.5, diagnose and repair, 1–3 runs per combination.
+171 runs over two experiments, all graded by the judge (Opus 5.5) against the answer keys. Claude Haiku 5.5 and Opus 5.5, diagnose and repair, 16 scenarios including the 3 retired ones.
 
-| | Runs | Avg steps | Avg time | Cost per run | Caching saves |
-|---|---|---|---|---|---|
-| Haiku, diagnose | 27 | 3.0 | 6s | $0.0008 | 31% |
-| Haiku, repair | 27 | 4.9 | 33s | $0.0020 | 30% |
-| Opus, diagnose | 18 | 3.0 | 8s | $0.0232 | 40% |
-| Opus, repair | 18 | 4.1 | 25s | $0.0440 | 41% |
+| | Runs | Pass | Partial | Fail | Avg steps | Avg time | Cost per run | Caching saves |
+|---|---|---|---|---|---|---|---|---|
+| Haiku, diagnose | 48 | 37 | 9 | 2 | 2.9 | 6s | $0.0009 | 27% |
+| Haiku, repair | 47 | 42 | 4 | 1 | 4.9 | 34s | $0.0022 | 27% |
+| Opus, diagnose | 38 | 38 | 0 | 0 | 3.0 | 8s | $0.0268 | 33% |
+| Opus, repair | 38 | 38 | 0 | 0 | 4.1 | 25s | $0.0465 | 38% |
 
-Graded by the judge (Opus 5.5) against the answer keys:
+### Where the models differ
 
-| | Pass | Partial | Fail |
-|---|---|---|---|
-| Haiku, diagnose | 21 | 5 | 1 |
-| Haiku, repair | 25 | 2 | 0 |
-| Opus, diagnose | 18 | 0 | 0 |
-| Opus, repair | 18 | 0 | 0 |
+Opus passed every run. Haiku passed every run on 12 of the 13 active scenarios. Nearly all of its misses are on one:
 
-- Both models reached the expected end state in every repair run. Haiku did it at about 1/22 of Opus's cost per repair.
-- Haiku's two partial repairs were both on `cache-port`, where the error message points at a value that is correct. It patched the client first, saw the rollout fail, and reverted. Opus fixed the server first in 3 of 3.
-- Haiku's diagnoses lost credit for offering a wrong fix as an alternative (`cache-port`, `slow-start`), declining to commit to the right value (`wrong-host`), and once blaming the wrong Deployment (`cache-port`).
-- Caching the tool definitions and system prompt cut cost by 30–41% per run. The rest of the input is conversation history, which is not cached yet.
-- Grading all 90 runs cost $2.11. Graded twice, the judge gave the same verdict on every calibration run the rubric change didn't target.
+| `cache-port` | Haiku | Opus |
+|---|---|---|
+| Diagnose | 1 pass, 6 partial, 2 fail (of 9) | 8 of 8 pass |
+| Repair | 3 pass, 4 partial, 1 fail (of 8) | 8 of 8 pass |
+| Repairs with a wrong patch | 5 of 8 (4 recovered, 1 left broken) | 0 of 8 |
 
-The sample is small (1–3 runs per scenario per model), so these are signals, not rates.
+Every miss is the same mistake. Haiku treats changing the client's `CACHE_PORT` to 6380 as a valid fix. In diagnoses it offers that as an equal alternative; in repairs it applies it first. The patch can't work, because the Service only exposes 6379, so the rollout check reports it unfinished. In 4 of 5 cases Haiku then read the new pod's logs, reverted, and fixed the server. In the fifth it stopped, blaming a Service it couldn't see. Its reasoning shows the trap: *"I left `deployment/cache` alone because it is healthy and the client was the side that did not match."*
+
+The second experiment ran 5 repeats per model on `cache-port` and three new scenarios built on the same two-sided pattern. Haiku solved all 30 runs of the three new ones. So the difficulty is narrower than "two sides could be fixed". In `cache-port`:
+
+- the broken pod's own error message contains only correct values (`cannot reach cache at cache:6379`),
+- the client holds an explicit setting that visibly disagrees with what the server actually runs (`CACHE_PORT=6379` against redis's `port=6380`),
+- the only in-cluster evidence that the server is the wrong side is its declared `containerPort: 6379`, and no healthy peer settles it.
+
+In `auth-mismatch` and `service-name`, a healthy client shows the right value, and Haiku used it every time. In `http-port`, the client's URL has no port to change.
+
+### Cost
+
+- Haiku costs 20–30× less per run than Opus. Across all 171 runs, Haiku cost $0.15 and Opus $2.78.
+- Caching the tool definitions and system prompt cut cost by 27–38% per run. The rest of the input is conversation history, which is not cached yet.
+- Grading all 171 runs cost $4.16, about $0.024 per run. On a 24-run calibration set the judge agreed with hand grades on 23. Graded twice, it gave the same verdict on every run the rubric change didn't target.
+
+Counts are out of 5–9 runs per cell. They show a consistent pattern on one fault type, not a precise failure rate.
 
 ## Running it
 
@@ -206,13 +219,13 @@ internal/agent    the loop and the diagnose / repair prompts
 internal/llm      Messages API client, prompt caching, model aliases
 internal/tools    namespace-scoped tools, patch guard, rollout check
 internal/telemetry  token prices and cost per run
-scenarios/        broken manifests, and truths/ with their answer keys
+scenarios/        broken manifests, truths/ with their answer keys, retired/ for dropped ones
 results/          runs.jsonl (every run) and grades.jsonl (the judge's grades);
                   logs/ holds console output, archive/ older runs and grades
 ```
 
 ## Next
 
+- More scenarios built to the narrower spec above, to test whether the `cache-port` result generalizes
 - Escalation: start with Haiku and hand off to Opus when a Haiku patch fails its rollout check
 - Ablations: thinking off, effort levels, caching the conversation history, trimmed tool output
-- More scenarios where the symptom's own evidence looks correct, and more repeats on the ones that separate models

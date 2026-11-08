@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-reconcile-auth-mismatch
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache
+  namespace: k8s-reconcile-auth-mismatch
+spec:
+  selector:
+    app: cache
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: k8s-reconcile-auth-mismatch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      containers:
+        - name: cache
+          image: redis:7.4
+          args: ["--requirepass", "alpha-7f3k"]
+          ports:
+            - containerPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: k8s-reconcile-auth-mismatch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: redis:7.4
+          env:
+            - name: CACHE_HOST
+              value: cache
+            - name: REDIS_PASSWORD
+              value: alpha-7f3k
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                out=$(redis-cli -h "$CACHE_HOST" -a "$REDIS_PASSWORD" --no-auth-warning ping 2>&1)
+                if [ "$out" = "PONG" ]; then echo "cache ok"; else echo "ERROR: cache rejected ping: $out"; fi
+                sleep 5
+              done
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "[ \"$(redis-cli -h \"$CACHE_HOST\" -a \"$REDIS_PASSWORD\" --no-auth-warning ping)\" = PONG ]"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: k8s-reconcile-auth-mismatch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: redis:7.4
+          env:
+            - name: CACHE_HOST
+              value: cache
+            - name: REDIS_PASSWORD
+              value: bravo-2m9q
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                out=$(redis-cli -h "$CACHE_HOST" -a "$REDIS_PASSWORD" --no-auth-warning ping 2>&1)
+                if [ "$out" = "PONG" ]; then echo "cache ok"; else echo "ERROR: cache rejected ping: $out"; fi
+                sleep 5
+              done
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "[ \"$(redis-cli -h \"$CACHE_HOST\" -a \"$REDIS_PASSWORD\" --no-auth-warning ping)\" = PONG ]"]
+            periodSeconds: 5
+            timeoutSeconds: 3
