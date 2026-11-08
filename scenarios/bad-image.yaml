@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: k8s-reconcile
+  name: k8s-reconcile-bad-image
 ---
 apiVersion: apps/v1
 kind: Deployment #actual deployment starts here
 metadata:
   name: web
-  namespace: k8s-reconcile
+  namespace: k8s-reconcile-bad-image
 spec: #whats in the deployement
   replicas: 1 #num pods
   selector:

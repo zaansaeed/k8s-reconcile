@@ -1,0 +1,15 @@
+namespace: k8s-reconcile-bad-image
+tier: 1
+faults:
+  - object: deployment/web
+    field: spec.template.spec.containers[web].image
+    current: nginx:1.27-does-not-exist
+    fix: change the image to a tag that exists, such as nginx:1.27
+    repairable: true
+    evidence: get_events shows the registry's "not found" for this tag
+    partial:
+      - names the image tag as the cause but cites no evidence that the tag does not exist
+    wrong:
+      - blames the registry, network or pull credentials instead of the tag
+expect_after_repair:
+  deployment/web: healthy

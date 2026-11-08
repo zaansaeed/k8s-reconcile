@@ -1,0 +1,16 @@
+namespace: k8s-reconcile-unschedulable
+tier: 2
+faults:
+  - object: deployment/worker
+    field: spec.template.spec.containers[worker].resources.requests.memory
+    current: 64Gi, with limits.memory also 64Gi
+    fix: lower the memory request and limit to something a node can hold, such as 64Mi; 64Gi is likely a typo for 64Mi
+    repairable: true
+    evidence: get_events shows FailedScheduling "Insufficient memory"; get_deployments shows request memory=64Gi
+    partial:
+      - lowers only the request and leaves the 64Gi limit; the pod schedules, but the limit stays wrong
+      - suggests adding a bigger node instead of fixing the request
+    wrong:
+      - changes the CPU request, the image or the command
+expect_after_repair:
+  deployment/worker: healthy
