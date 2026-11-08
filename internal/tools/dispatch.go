@@ -13,6 +13,8 @@ func (t *Tools) Dispatch(ctx context.Context, name string, input json.RawMessage
 		return t.GetPods(ctx)
 	case "get_events":
 		return t.GetEvents(ctx)
+	case "get_deployments":
+		return t.GetDeployments(ctx)
 	case "get_logs":
 		var args struct {
 			Pod      string `json:"pod"`

@@ -106,7 +106,7 @@ func printStep(info agent.StepInfo) {
 	if text := strings.TrimSpace(info.Text); text != "" && len(info.Calls) != 0 {
 		fmt.Printf("  %s\n", firstLine(text, 160))
 	}
-	
+
 	for _, call := range info.Calls {
 		fmt.Printf("  model use -> %s %s\n", call.Name, call.Input)
 		output := info.Results[call.ID]
@@ -138,6 +138,12 @@ func dumpTools(ctx context.Context, kube *tools.Tools, pod string, previous bool
 		return fmt.Errorf("get events: %w", err)
 	}
 	fmt.Print(events)
+
+	deployments, err := kube.GetDeployments(ctx)
+	if err != nil {
+		return fmt.Errorf("get deployments: %w", err)
+	}
+	fmt.Print(deployments)
 
 	if pod == "" {
 		return nil

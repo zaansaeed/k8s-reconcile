@@ -21,6 +21,11 @@ func Specs() []Spec {
 			Properties:  map[string]any{},
 		},
 		{
+			Name:        "get_deployments",
+			Description: "List every deployment in the namespace with its rollout conditions and the pod template it asks for: each container's image, command, args, ports, env vars and where their values come from, volume mounts, probes and resource requests. This is the desired state; compare it with what pods and events report. Secret values are never shown.",
+			Properties:  map[string]any{},
+		},
+		{
 			Name:        "get_logs",
 			Description: "Return the last 50 log lines from a pod. Set previous=true to read the log of the container's previous, crashed instance, which is where a CrashLoopBackOff cause is visible.",
 			Properties: map[string]any{
