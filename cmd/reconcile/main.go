@@ -29,6 +29,7 @@ func main() {
 	kubeconfig := flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig")
 	namespace := flag.String("namespace", "default", "namespace the tools operate in")
 	task := flag.String("task", "", "what to ask the agent; defaults to a diagnose request for the namespace") //first user message (after cached tools+system)
+	model := flag.String("model", "opus", "model to run: opus, sonnet, haiku, or a full model ID")
 	maxSteps := flag.Int("max-steps", 12, "model calls before the agent gives up")
 	timeout := flag.Duration("timeout", 5*time.Minute, "deadline for the whole run")
 	verbose := flag.Bool("verbose", false, "print each step as the agent takes it")
@@ -63,7 +64,9 @@ func main() {
 		*task = fmt.Sprintf("Namespace %s has a broken workload. Diagnose the root cause.", *namespace)
 	}
 
-	client := llm.New(llm.DefaultConfig(agent.SystemPrompt), tools.Specs())
+	config := llm.DefaultConfig(agent.SystemPrompt)
+	config.Model = llm.ResolveModel(*model)
+	client := llm.New(config, tools.Specs())
 	run := &telemetry.Run{Model: client.Model()}
 	diagnoser := agent.New(client, kube, run, *maxSteps) //init agent
 	if *verbose {
@@ -90,6 +93,8 @@ func main() {
 	)
 	if cost, known := run.CostUSD(); known {
 		fmt.Printf("cost $%.4f (%s)\n", cost, run.Model)
+	} else {
+		fmt.Printf("cost unknown: no price for %s in telemetry/cost.go\n", run.Model)
 	}
 }
 
