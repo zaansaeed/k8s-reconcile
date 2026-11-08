@@ -1,5 +1,6 @@
 namespace: k8s-reconcile-liveness
 tier: 3
+settle: 60s
 faults:
   - object: deployment/shop
     field: spec.template.spec.containers[shop].livenessProbe.httpGet.path

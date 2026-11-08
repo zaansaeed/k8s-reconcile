@@ -1,0 +1,130 @@
+
+ NEW SCENARIO: k8s-reconcile-bad-image 
+recreated k8s-reconcile-bad-image, waiting 15s for it to settle
+
+The namespace is healthy now. There was one fault, and it is fixed.
+
+**Fault: `deployment/web` had a nonexistent image tag.**
+- **What was wrong:** The container image was `nginx:1.27-does-not-exist`. The registry returned NotFound, so the pod sat in `ImagePullBackOff` and the deployment never became available.
+- **Patch applied:** Changed the `web` container's image to `nginx:1.27`. This is the valid tag matching the intended 1.27 line. The tag is my inference from the broken name, not a value the cluster confirmed, but the rollout result shows it works.
+- **Rollout result:** Complete. 1 of 1 pods runs the new template and is available. The new pod `web-8c96c8dfc-8vgpq` is Running, ready 1/1, with no restarts.
+
+The namespace is now healthy. No other workloads were present, and I did not touch anything else.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2699 (uncached 1x)  out 709  cache_write 2039 (1.25x)  cache_read 4078 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/web  {"spec":{"template":{"spec":{"containers":[{"name":"web","image":"nginx:1.27"}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-crashloop 
+recreated k8s-reconcile-crashloop, waiting 30s for it to settle
+
+The namespace is not healthy, and I did not apply a patch because the fix needs a value I don't have.
+
+**Fault: `deployment/api` (container `api`) is missing `DATABASE_URL`**
+
+- **What's wrong:** The container's startup script exits with `FATAL: DATABASE_URL is not set` when that variable is empty. The deployment has `env: none`, so nothing in the pod template supplies it. The pod `api-757995864d-6f2tr` is in a restart loop (0/1 ready, restarts several times), and the events show repeated BackOff. The logs match: the only line is the FATAL message.
+- **Patch applied:** None. The correct value is a database connection string (a URL, and possibly a credential), which I cannot know. It may come from a Secret or ConfigMap, but I can't read Secrets and I can't list other objects in the namespace. Inventing a URL would be guesswork, and the rules forbid that.
+- **Rollout result:** Not run. No patch was sent, so `apply_patch` did not wait on anything.
+
+**What is needed to fix it:** Someone with access to the right values must supply `DATABASE_URL` to the `api` deployment. For example, add an env entry that references the existing Secret or ConfigMap that holds the database connection string (name and key needed from whoever owns it), or supply the literal URL. Once that is in the pod template, the rollout should be able to proceed, and I can apply it and verify the pod stays up if you give me the source name and key.
+
+**Namespace status:** Not healthy. `api` is unavailable (`Available=False`, `ready=0/1`). It is the only workload in the namespace.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1747 (uncached 1x)  out 931  cache_write 0 (1.25x)  cache_read 6117 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (0)------------
+
+ NEW SCENARIO: k8s-reconcile-liveness 
+recreated k8s-reconcile-liveness, waiting 1m0s for it to settle
+
+The namespace is healthy now. There was one fault, in `deployment/shop`.
+
+**Fault: `deployment/shop` had a liveness probe pointing at a path nginx doesn't serve.**
+- **What was wrong:** The liveness probe did `HTTP GET /healthz` on port 80. The `nginx:1.27` image returns 404 for that path. The kubelet therefore killed the container after three failures, and the pod went into CrashLoopBackOff. The container logs show a normal nginx shutdown (the kubelet's SIGQUIT), not an application crash.
+- **Patch applied:** Changed the liveness probe path from `/healthz` to `/` on port 80, leaving the initial delay, period and failure threshold unchanged:
+  `{"spec":{"template":{"spec":{"containers":[{"name":"shop","livenessProbe":{"httpGet":{"path":"/","port":80}}}]}}}}`
+- **Rollout result:** Complete. One of one pods runs the new template, it is available, and it stayed up for 10 seconds without restarting. The new pod `shop-866c4b5477-hfkq6` is Running with 1/1 ready and zero restarts.
+
+I did not remove or loosen the probe. It still checks HTTP availability on the container's port; it now checks a path that exists. The `/healthz` endpoint doesn't exist in this image, so if the team expects a dedicated health endpoint, the image or its configuration would need to provide one. Nothing else needed a value I couldn't supply.
+
+------------TOTAL METRICS------------
+
+steps 5  in 11067 (uncached 1x)  out 1221  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0018 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/shop  {"spec":{"template":{"spec":{"containers":[{"name":"shop","livenessProbe":{"httpGet":{"path":"/","port":80}}}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-multi 
+recreated k8s-reconcile-multi, waiting 15s for it to settle
+
+Two of the three faults are fixed. The `api` deployment still needs a value I cannot supply.
+
+**1. `worker` (Deployment/worker): wrong readiness probe port**
+- **What was wrong:** The readiness probe was `httpGet /` on port 8080. The nginx:1.27 container listens on port 80, and its logs show it started normally. The probe was refused every time, so the pod stayed at 0/1 ready.
+- **Patch:** Changed the `worker` container's readiness probe to `httpGet` path `/` on port `80`.
+- **Rollout result:** Complete. The new pod (`worker-74649d55b8-5fq8f`) is 1/1 ready and has not restarted.
+
+**2. `api` (Deployment/api): non-existent image tag**
+- **What was wrong:** The image `busybox:1.63` does not exist. The pull failed with NotFound, so the pod was stuck in ImagePullBackOff.
+- **Patch:** Changed the `api` container image to `busybox:1.36`, a published busybox tag. I chose this version by inference from the typo, not from a registry lookup.
+- **Rollout result:** Deployed but not stable. The image now pulls, but the container exits with code 1 and restarts. Its log reads `FATAL: DATABASE_URL is not set`. The container command checks for `DATABASE_URL` and exits when it is missing, and the deployment has no env entries at all.
+- **Still needed:** A value for `DATABASE_URL`, the connection URL for the database the api uses. I did not invent one, and I did not change the command to skip the check. Someone who knows the database endpoint needs to supply it, either as a plain env value or from a Secret. Once that is in the pod template, the api should be able to start. I can't read Secrets, so if one already holds this URL, its name and key must come from whoever manages the namespace.
+
+**Namespace status:** Not fully healthy. `web` and `worker` are healthy and unchanged except for the worker probe fix. `api` still needs the `DATABASE_URL` value described above.
+
+------------TOTAL METRICS------------
+
+steps 5  in 15924 (uncached 1x)  out 1899  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0026 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (2)------------
+1. deployment/worker  {"spec":{"template":{"spec":{"containers":[{"name":"worker","readinessProbe":{"httpGet":{"path":"/","port":80}}}]}}}}
+2. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","image":"busybox:1.36"}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-readiness 
+recreated k8s-reconcile-readiness, waiting 15s for it to settle
+
+I found one fault and fixed it. The namespace is healthy.
+
+**Fault: `deployment/frontend` had its readiness probe pointed at the wrong port.**
+- **What was wrong:** The readiness probe sent `GET /` to port 8080. The nginx:1.27 container serves on port 80, which the deployment also declares. Every probe got "connection refused" on 8080, so the pod stayed at 0/1 ready and the deployment never became available. The pod's logs showed nginx starting normally.
+- **Patch applied:** Changed only the readiness probe's `httpGet.port` from 8080 to 80. The path and timings were left as they were, and the probe was not removed or loosened.
+- **Rollout result:** The rollout completed. One of one pods runs the new template, it is available, and it stayed up for 10s without restarting. The new pod is `frontend-584b948bd6-7s87w`, Running, 1/1 ready, with no restarts.
+
+The namespace is now healthy. No other workloads were present, and I made no other changes.
+
+------------TOTAL METRICS------------
+
+steps 5  in 8703 (uncached 1x)  out 1064  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0015 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/frontend  {"spec":{"template":{"spec":{"containers":[{"name":"frontend","readinessProbe":{"httpGet":{"path":"/","port":80}}}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-unschedulable 
+recreated k8s-reconcile-unschedulable, waiting 15s for it to settle
+
+The namespace is healthy now. There was one fault, and it is fixed.
+
+**Fault: `deployment/worker` requested far too much memory.**
+- **What was wrong:** The container asked for `memory=64Gi` as both request and limit. The single node could not fit that, so the pod stayed Pending. The event was `FailedScheduling: 0/1 nodes are available: 1 Insufficient memory`. The workload is `sleep 3600` on busybox, which needs only a few megabytes.
+- **Patch applied:** Set the container `worker` resources to `requests.memory=64Mi` and `limits.memory=64Mi`. The CPU request of 100m was left unchanged.
+- **Rollout result:** Complete. One pod runs the new template, it is available, and it stayed up without restarting for 10s. The new pod is `worker-5cd9f784d7-rrjvh`, Running, 1/1 ready, with no restarts.
+
+I chose 64Mi because it matches the workload's actual needs. The original value looked like a unit or typo error, but I could not confirm the intended figure from the tools, so the owner may want to review it.
+
+------------TOTAL METRICS------------
+
+steps 4  in 3718 (uncached 1x)  out 912  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/worker  {"spec":{"template":{"spec":{"containers":[{"name":"worker","resources":{"requests":{"memory":"64Mi"},"limits":{"memory":"64Mi"}}}]}}}}

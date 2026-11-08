@@ -3,8 +3,27 @@
 package tools
 
 import (
+	"fmt"
+
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
 )
+
+// Connect builds a cluster client from a kubeconfig, using the same lookup as
+// kubectl: the given path if set, then $KUBECONFIG, then ~/.kube/config.
+func Connect(kubeconfig string) (kubernetes.Interface, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	rules.ExplicitPath = kubeconfig
+	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("creating clientset: %w", err)
+	}
+	return clientset, nil
+}
 
 // Toolbox gives the agent access to one namespace. The namespace is fixed at
 // construction so the LLM can never point a tool at another namespace.

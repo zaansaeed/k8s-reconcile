@@ -69,7 +69,11 @@ func containerProblems(p corev1.Pod) string {
 		// State.Waiting and LastTerminationState.Terminated are pointers that
 		// are nil unless that state applies, so check before reading them.
 		if w := c.State.Waiting; w != nil {
-			parts = append(parts, fmt.Sprintf("%s waiting: %s", c.Name, w.Reason))
+			reason := w.Reason
+			if reason == "ErrImagePull" {
+				reason = "ImagePullBackOff"
+			}
+			parts = append(parts, fmt.Sprintf("%s waiting: %s", c.Name, reason))
 		}
 		if last := c.LastTerminationState.Terminated; last != nil {
 			parts = append(parts, fmt.Sprintf("%s last: %s (exit %d)", c.Name, last.Reason, last.ExitCode))

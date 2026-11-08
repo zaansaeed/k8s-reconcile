@@ -1,0 +1,113 @@
+recreated k8s-reconcile-bad-image, waiting 15s for it to settle
+
+**Fault 1: Deployment `web` has a non-existent image tag.**
+
+- **Field:** `spec.template.spec.containers[web].image` is `nginx:1.27-does-not-exist`.
+- **Fix:** Change the image to a tag that exists on Docker Hub, such as `nginx:1.27` (the tag the name suggests), and roll the deployment out again.
+- **Evidence:**
+  - get_pods: `web-6ff6bfc457-qsxtx` is Pending, 0/1 ready, with the container waiting on `ImagePullBackOff`.
+  - get_deployments: the container image is `nginx:1.27-does-not-exist`. The deployment has 0 of 1 replicas available, and Available=False with MinimumReplicasUnavailable.
+  - get_events: the registry returned `NotFound` for `docker.io/library/nginx:1.27-does-not-exist`, which leads to `ErrImagePull` and then `ImagePullBackOff`.
+
+No other faults were found. The pod was scheduled normally, and the deployment has no env, probe or resource problems that would contribute.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1652 (uncached 1x)  out 571  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+recreated k8s-reconcile-crashloop, waiting 30s for it to settle
+
+**Fault: DATABASE_URL is missing from the api container**
+
+- **Object:** `deployment/api`
+- **Field wrong:** `spec.template.spec.containers[api].env` is empty ("env: none"), so `DATABASE_URL` is never injected. The startup script checks `$DATABASE_URL`, finds it empty, and exits 1.
+- **Fix:** Add the variable to the container, sourced from wherever the database connection string is kept. For example, `env: [{name: DATABASE_URL, valueFrom: {secretKeyRef: {name: <secret>, key: <key>}}}]`, or a plain `value:` if that is the intended config. I could not confirm which Secret or ConfigMap holds the value, so the source name is yours to supply.
+- **Evidence:**
+  - get_deployments: the container shows `env: none`, and its args contain the `DATABASE_URL` check that exits 1.
+  - get_logs on `api-757995864d-l666p`: `FATAL: DATABASE_URL is not set`.
+  - get_pods: the pod is at ready=0/1 with several restarts and last exit code 1.
+  - get_events: BackOff on the container, with the owning ReplicaSet `api-757995864d` and Deployment `api`.
+
+The rollout reports Progressing=True, but the deployment is not Available because its only pod keeps crashing. No other workload exists in the namespace.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1664 (uncached 1x)  out 619  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0005 (claude-haiku-5-5)
+recreated k8s-reconcile-liveness, waiting 1m0s for it to settle
+
+**Fault: liveness probe on `deployment/shop` hits a path nginx does not serve**
+
+- **Faulty object:** `deployment/shop` (container `shop`, image `nginx:1.27`)
+- **Wrong field:** `livenessProbe.httpGet.path` is `/healthz` on port 80. The default nginx:1.27 image has no `/healthz` route, so it returns 404.
+- **Fix:** Point the probe at a path nginx actually serves, such as `/`, or add a `/healthz` location to the nginx config (for example via a ConfigMap-mounted `default.conf`) that returns 200. Then confirm the probe passes.
+- **Evidence:**
+  - get_deployments: the liveness probe is `http GET /healthz on port 80, initialDelay=5s period=5s failureThreshold=3`.
+  - get_events: repeated `Unhealthy` warnings say "Liveness probe failed: HTTP probe failed with statuscode: 404", followed by repeated `Killing` events ("failed liveness probe, will be restarted").
+  - get_logs (previous attempt): nginx logs "gracefully shutting down" and exits with code 0. That is the kubelet's SIGTERM stop after the probe failures, not an application crash, which explains the "Completed (exit 0)" status and the restart count.
+  - get_pods: the pod is Running and 1/1 ready between restarts, with restarts "several".
+
+The pod's current state is healthy only because it restarts repeatedly. The probe is the root cause. No image, env or resource fault was found.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3379 (uncached 1x)  out 1039  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+recreated k8s-reconcile-multi, waiting 15s for it to settle
+
+Two faults, both independent. The `web` deployment is healthy.
+
+**1. `deployment/api`: wrong image tag**
+- Field: `spec.template.spec.containers[api].image` = `busybox:1.63`
+- Fix: change it to a tag that exists on Docker Hub, such as `busybox:1.36`. Pin to whichever tag you intend.
+- Evidence: get_pods shows `api-ddff86cfd-2mtpk` Pending with `ImagePullBackOff`. get_events shows `Failed to pull image "busybox:1.63" ... code = NotFound ... busybox:1.63: not found`, followed by ErrImagePull and BackOff.
+- Latent second fault: the container command exits 1 unless `DATABASE_URL` is set, and get_deployments shows `env: none`. Once the image pulls, the pod will crash-loop unless the variable is supplied, for example from a Secret or ConfigMap via `env`/`envFrom`. This is not yet visible in the logs because the container has never started.
+
+**2. `deployment/worker`: readiness probe on the wrong port**
+- Field: `spec.template.spec.containers[worker].readinessProbe.httpGet.port` = `8080`
+- Fix: change it to `80`, which is the port the nginx:1.27 image listens on and the port the deployment declares.
+- Evidence: get_deployments shows the probe as "http GET / on port 8080" while the container's port is 80/TCP. get_events shows repeated `Readiness probe failed: ... 10.244.0.77:8080: connection refused`. get_logs for `worker-56f6bcb496-4wmsq` shows nginx started normally and reported "start worker processes" with no errors. The pod is Running, 0/1 ready, and has no restarts, which is consistent with a probe failure and not a crash.
+
+------------TOTAL METRICS------------
+
+steps 3  in 4346 (uncached 1x)  out 966  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0010 (claude-haiku-5-5)
+recreated k8s-reconcile-readiness, waiting 15s for it to settle
+
+**Fault: readiness probe targets the wrong port on `deployment/frontend`**
+
+- **Faulty object:** `deployment/frontend` (pod `frontend-6f78465646-5htrd`, owned by ReplicaSet `frontend-6f78465646`)
+- **Wrong field:** `readinessProbe.httpGet.port` is `8080`. The container serves on `80/TCP`, and the image is `nginx:1.27`.
+- **Fix:** change the readiness probe's httpGet port from `8080` to `80`. The pod will then pass the probe and the deployment will become Available.
+- **Evidence:**
+  - get_pods: the pod is `Running` with `ready=0/1` and no restarts. The container is not crashing; it is just never ready.
+  - get_deployments: `Available=False` with `MinimumReplicasUnavailable`. The readiness probe is `http GET / on port 8080`, and the container port is `80/TCP`.
+  - get_events: repeated `Unhealthy` warnings say `Readiness probe failed: Get "http://10.244.0.78:8080/": dial tcp 10.244.0.78:8080: connect: connection refused`.
+
+I did not call get_logs because the container never crashed. The connection-refused errors come from nothing listening on 8080.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1492 (uncached 1x)  out 607  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0005 (claude-haiku-5-5)
+recreated k8s-reconcile-unschedulable, waiting 15s for it to settle
+
+Diagnosis: the `worker` pod is unschedulable because its memory request is far larger than the node can supply.
+
+**Faulty object:** `deployment/worker` (pod `worker-69f9478cc5-jc485`, owned by ReplicaSet `worker-69f9478cc5`)
+
+**Wrong field:** `spec.template.spec.containers[worker].resources.requests.memory` = `64Gi` (the limit is also `64Gi`, which is the same problem).
+
+**Fix:** Lower the memory request and limit to a value the node can actually provide, for example `256Mi` or `512Mi`, which is what a `sleep` container needs. If the workload truly needs 64Gi, the cluster needs a node with that much free memory instead.
+
+**Evidence:**
+- get_pods: `worker-69f9478cc5-jc485` is `Pending`, ready 0/1, with no restarts. It never started, so this is a scheduling problem, not a crash.
+- get_events: `FailedScheduling` reports `0/1 nodes are available: 1 Insufficient memory`, and preemption cannot help.
+- get_deployments: the container requests `memory=64Gi` and limits `memory=64Gi`. The deployment shows `Available=False`, `MinimumReplicasUnavailable`, with `ready=0`.
+
+The image (`busybox:1.36`) and command (`sh -c "exec sleep 3600"`) look valid. Nothing in the output suggests a fault there.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1252 (uncached 1x)  out 596  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0005 (claude-haiku-5-5)

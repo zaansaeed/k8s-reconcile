@@ -1,0 +1,113 @@
+
+ NEW SCENARIO: k8s-reconcile-bad-image 
+recreated k8s-reconcile-bad-image, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/web, container `web`
+- **Wrong field:** `spec.template.spec.containers[web].image`. It is set to `nginx:1.27-does-not-exist`, a tag that doesn't exist in the registry.
+- **Fix:** Change the image to a tag that exists, such as `nginx:1.27`. The deployment will then roll out a new ReplicaSet that replaces the stuck pod `web-6ff6bfc457-z25s7`.
+- **Evidence:**
+  - get_deployments shows the image `nginx:1.27-does-not-exist`. It also shows `Available=False` with reason `MinimumReplicasUnavailable`, and 0 of 1 replicas ready.
+  - get_pods shows `web-6ff6bfc457-z25s7` in Pending, with container `web` waiting on `ImagePullBackOff`.
+  - get_events shows the pull failing again and again: `Failed to pull image "nginx:1.27-does-not-exist": ... docker.io/library/nginx:1.27-does-not-exist: not found`. This produced `ErrImagePull` and then `ImagePullBackOff`. The pod was scheduled without trouble, so the only problem is the image.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1521 (uncached 1x)  out 495  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0238 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-crashloop 
+recreated k8s-reconcile-crashloop, waiting 30s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Wrong field:** `spec.template.spec.containers[api].env` is empty (`env: none`). The startup script checks for `DATABASE_URL`, finds it unset, and exits with code 1.
+- **Fix:** Add a `DATABASE_URL` env entry to the `api` container. Either set the value directly or pull it with `valueFrom.secretKeyRef` or `configMapKeyRef`. The tools don't show the correct value or which Secret holds it, so you'll need to supply that.
+- **Evidence:**
+  - get_deployments: `env: none`, and the args run `if [ -z "$DATABASE_URL" ] ... exit 1`.
+  - get_pods: pod `api-757995864d-gftw4` is at ready 0/1, has restarted several times, and last ended with Error (exit 1).
+  - get_logs: `FATAL: DATABASE_URL is not set`.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1209 (uncached 1x)  out 438  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0145 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-liveness 
+recreated k8s-reconcile-liveness, waiting 1m0s for it to settle
+
+**Fault 1**
+- **Object:** deployment/shop, container `shop`
+- **Wrong field:** `livenessProbe.httpGet.path` is set to `/healthz` (port 80). The stock `nginx:1.27` image has nothing at that path and returns 404.
+- **Fix:** Point the probe at a path nginx actually serves, for example `path: /` on port 80. The other option is to add a `/healthz` location to the nginx config.
+- **Evidence:**
+  - get_events shows these repeated events: `Liveness probe failed: HTTP probe failed with statuscode: 404`, `Container shop failed liveness probe, will be restarted`, and `Back-off restarting failed container shop`.
+  - get_pods shows the pod is not crashing on its own: `shop-549cc9fb75-gvrtq` is in CrashLoopBackOff with several restarts and last exited `Completed (exit 0)`. That fits nginx shutting down cleanly when the kubelet kills it, not nginx failing.
+  - get_deployments shows the probe is `http GET /healthz on port 80, initialDelay=5s period=5s failureThreshold=3` with image `nginx:1.27`.
+  - The deployment's `ready=1 available=1` status is out of date. get_pods shows the pod at `ready=0/1`.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1682 (uncached 1x)  out 571  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0190 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-multi 
+recreated k8s-reconcile-multi, waiting 15s for it to settle
+
+I found two faults. The web deployment is healthy: its one readiness failure on port 80 happened at startup and the pod is now 1/1 ready.
+
+**1. deployment/api: the image doesn't exist**
+- **Field:** `spec.template.spec.containers[api].image` is `busybox:1.63`.
+- **Fix:** Change it to a busybox tag that exists, such as `busybox:1.36`.
+- **Evidence:**
+  - get_events: `Failed to pull image "busybox:1.63" ... docker.io/library/busybox:1.63: not found`, followed by ErrImagePull and ImagePullBackOff.
+  - get_pods: `api-ddff86cfd-9hjc8` is Pending with 0/1 ready, waiting on ImagePullBackOff.
+- **Next problem once the image is fixed:** The container's script exits with `FATAL: DATABASE_URL is not set` (code 1) when that variable is empty. get_deployments shows the container has `env: none`. Add a `DATABASE_URL` env var from the right Secret or ConfigMap, or the pod will go into CrashLoopBackOff instead.
+
+**2. deployment/worker: the readiness probe checks the wrong port**
+- **Field:** `spec.template.spec.containers[worker].readinessProbe.httpGet.port` is `8080`.
+- **Fix:** Change it to `80`, the port nginx:1.27 listens on and the container declares (`80/TCP`).
+- **Evidence:**
+  - get_deployments: the worker container declares port 80/TCP, but its readiness probe is `http GET / on port 8080`.
+  - get_events: `Readiness probe failed: Get "http://10.244.0.97:8080/": ... connection refused` (repeated).
+  - get_pods: `worker-56f6bcb496-zw6qn` is Running but 0/1 ready.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3195 (uncached 1x)  out 796  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0296 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-readiness 
+recreated k8s-reconcile-readiness, waiting 15s for it to settle
+
+**Fault 1: the readiness probe checks the wrong port**
+
+- **Object:** deployment/frontend, container `frontend`
+- **Wrong field:** `readinessProbe.httpGet.port` is set to `8080`. The container serves on port `80/TCP` (image `nginx:1.27`).
+- **Fix:** Change the readiness probe port to `80`, or to the named container port. The probe path `/` can stay as it is.
+- **Evidence:**
+  - **get_deployments:** the container declares port 80/TCP, but its readiness probe is `http GET / on port 8080`. The deployment shows Available=False (MinimumReplicasUnavailable) with ready=0.
+  - **get_pods:** pod frontend-6f78465646-fkgqw is Running with ready=0/1 and no restarts. So the container itself is healthy, and only the readiness check is failing.
+  - **get_events:** a repeated Warning reads `Readiness probe failed: Get "http://10.244.0.98:8080/": dial tcp 10.244.0.98:8080: connect: connection refused`. Nothing is listening on 8080.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1436 (uncached 1x)  out 487  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0164 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-unschedulable 
+recreated k8s-reconcile-unschedulable, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/worker, container `worker`
+- **Wrong field:** `resources.requests.memory` is `64Gi`, and `resources.limits.memory` is also `64Gi`. No node in the cluster has that much memory free.
+- **Fix:** Lower the memory request and limit to something that fits on a node. The container only runs `sleep 3600`, so something like `64Mi` would do (I'm guessing `Gi` was typed where `Mi` was meant).
+- **Evidence:**
+  - get_pods: pod `worker-69f9478cc5-lmdz7` is `Pending` with ready 0/1 and no restarts.
+  - get_deployments: the deployment asks for `request memory=64Gi limit memory=64Gi` and reports `Available=False` (`MinimumReplicasUnavailable`).
+  - get_events: `FailedScheduling`, "0/1 nodes are available: 1 Insufficient memory. preemption: ... not helpful". The ReplicaSet `worker-69f9478cc5` belongs to deployment/worker.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1232 (uncached 1x)  out 444  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0147 (claude-opus-5-5)

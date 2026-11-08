@@ -1,5 +1,6 @@
 namespace: k8s-reconcile-crashloop
 tier: 1
+settle: 30s
 faults:
   - object: deployment/api
     field: spec.template.spec.containers[api].env
