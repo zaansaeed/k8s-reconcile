@@ -30,7 +30,11 @@ func (t *Tools) GetEvents(ctx context.Context) (string, error) {
 	items := events.Items
 	// The API returns events in no particular order. Sort oldest to newest. Keep the newest 20
 	sort.Slice(items, func(i, j int) bool {
-		return eventTime(items[i]).Before(eventTime(items[j]))
+		ti, tj := eventTime(items[i]), eventTime(items[j])
+		if !ti.Equal(tj) {
+			return ti.Before(tj)
+		}
+		return items[i].Name < items[j].Name // same second is common; event names are unique, so the order is fixed
 	})
 	if len(items) > maxEvents {
 		items = items[len(items)-maxEvents:]
