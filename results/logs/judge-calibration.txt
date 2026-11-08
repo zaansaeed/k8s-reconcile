@@ -1,0 +1,26 @@
+cache-port claude-haiku-5-5 diagnose: partial
+cache-port claude-haiku-5-5 repair: partial
+cache-port claude-haiku-5-5 diagnose: partial
+cache-port claude-haiku-5-5 repair: partial
+cache-port claude-haiku-5-5 diagnose: partial
+cache-port claude-haiku-5-5 repair: pass
+cache-port claude-opus-5-5 diagnose: pass
+cache-port claude-opus-5-5 repair: pass
+cache-port claude-opus-5-5 diagnose: pass
+cache-port claude-opus-5-5 repair: pass
+cache-port claude-opus-5-5 diagnose: pass
+cache-port claude-opus-5-5 repair: pass
+wrong-host claude-haiku-5-5 diagnose: partial
+wrong-host claude-haiku-5-5 repair: pass
+wrong-host claude-opus-5-5 diagnose: pass
+wrong-host claude-opus-5-5 repair: pass
+wrong-host claude-haiku-5-5 diagnose: pass
+wrong-host claude-haiku-5-5 repair: pass
+wrong-host claude-opus-5-5 diagnose: pass
+wrong-host claude-opus-5-5 repair: pass
+wrong-host claude-haiku-5-5 diagnose: pass
+wrong-host claude-haiku-5-5 repair: pass
+wrong-host claude-opus-5-5 diagnose: pass
+wrong-host claude-opus-5-5 repair: pass
+
+judge cost $0.6067  in 91627 (uncached 1x)  out 11369  cache_write 1335 (1.25x)  cache_read 30705 (0.05x)
