@@ -18,7 +18,7 @@ import (
 // tools it may run, and the run it records token usage into.
 type Agent struct {
 	client   *llm.Client
-	tools    *tools.Toolbox
+	toolbox  *tools.Toolbox
 	run      *telemetry.Run
 	maxSteps int
 
@@ -40,8 +40,8 @@ func (agent *Agent) emit(info StepInfo) {
 }
 
 // New returns an Agent that gives up after maxSteps model calls.
-func New(client *llm.Client, kube *tools.Toolbox, run *telemetry.Run, maxSteps int) *Agent {
-	return &Agent{client: client, tools: kube, run: run, maxSteps: maxSteps}
+func New(client *llm.Client, toolbox *tools.Toolbox, run *telemetry.Run, maxSteps int) *Agent {
+	return &Agent{client: client, toolbox: toolbox, run: run, maxSteps: maxSteps}
 }
 
 // Result is what one run produced.
@@ -76,7 +76,7 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 		}
 
 		for i, call := range reply.Calls { // run each call the model made, in order, and keep its output on the call
-			output, err := agent.tools.Dispatch(ctx, call.Name, call.Input)
+			output, err := agent.toolbox.Dispatch(ctx, call.Name, call.Input)
 			if err != nil {
 				return nil, fmt.Errorf("step %d: tool %s: %w", step, call.Name, err)
 			}

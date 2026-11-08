@@ -1,6 +1,10 @@
 package telemetry
 
-import "github.com/zaansaeed/k8s-reconcile/internal/llm"
+import (
+	"fmt"
+
+	"github.com/zaansaeed/k8s-reconcile/internal/llm"
+)
 
 type price struct {
 	input      float64
@@ -44,4 +48,21 @@ func (run *Run) Record(usage llm.Usage) {
 
 func (run *Run) CostUSD() (float64, bool) {
 	return CostUSD(run.Model, run.Usage)
+}
+
+// UsageLine formats token counts, labelling the cache counts with their price
+// relative to plain input. The labels come from the price table, so they can't
+// disagree with the cost; a model with no price gets no labels.
+func (run *Run) UsageLine(u llm.Usage) string {
+	rate, known := prices[run.Model]
+	if !known {
+		return fmt.Sprintf("in %d  out %d  cache_write %d  cache_read %d",
+			u.InputTokens, u.OutputTokens, u.CacheWriteTokens, u.CacheReadTokens)
+	}
+	// %.3g keeps at most 3 significant digits, so 0.01/0.10, which is
+	// 0.09999999999999999 in floating point, prints as 0.1.
+	return fmt.Sprintf("in %d (uncached 1x)  out %d  cache_write %d (%.3gx)  cache_read %d (%.3gx)",
+		u.InputTokens, u.OutputTokens,
+		u.CacheWriteTokens, rate.cacheWrite/rate.input,
+		u.CacheReadTokens, rate.cacheRead/rate.input)
 }

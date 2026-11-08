@@ -2,11 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,18 +19,13 @@ import (
 )
 
 func main() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		log.Fatalf("finding home dir: %v", err)
-	}
-
 	//potential flags
-	kubeconfig := flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "path to kubeconfig")
+	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig; defaults to $KUBECONFIG, then ~/.kube/config")
 	namespace := flag.String("namespace", "default", "namespace the tools operate in")
 	task := flag.String("task", "", "what to ask the agent; defaults to a diagnose request for the namespace") //first user message (after cached tools+system)
 	model := flag.String("model", "opus", "model to run: opus, sonnet, haiku, or a full model ID")
-	maxSteps := flag.Int("max-steps", 12, "model calls before the agent gives up")
-	timeout := flag.Duration("timeout", 5*time.Minute, "deadline for the whole run")
+	maxSteps := flag.Int("max-steps", 0, "model calls before the agent gives up; defaults to 12, or 25 with -allow-writes")
+	timeout := flag.Duration("timeout", 0, "deadline for the whole run; defaults to 5m, or 15m with -allow-writes")
 	verbose := flag.Bool("verbose", false, "print each step as the agent takes it")
 	dump := flag.Bool("dump", false, "print raw tool output and exit instead of running the agent")
 	pod := flag.String("pod", "", "with -dump, pod to read logs from; skipped when empty")
@@ -39,18 +33,23 @@ func main() {
 	allowWrites := flag.Bool("allow-writes", false, "let the agent patch deployments and wait for rollouts; uses the repair prompt")
 	flag.Parse()
 
-	if *allowWrites { // repair runs wait on rollouts, so give them more time unless the user chose
-		explicit := map[string]bool{}
-		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
-		if !explicit["timeout"] {
-			*timeout = 15 * time.Minute
-		}
-		if !explicit["max-steps"] {
-			*maxSteps = 25
-		}
+	prompt, taskFormat, steps, deadline := agent.SystemPrompt, "Namespace %s has a broken workload. Diagnose the root cause.", 12, 5*time.Minute
+	if *allowWrites { // repair runs wait on rollouts, so they get more steps and time
+		prompt, taskFormat, steps, deadline = agent.RepairPrompt, "Namespace %s has a broken workload. Diagnose and repair it.", 25, 15*time.Minute
+	}
+	if *maxSteps == 0 {
+		*maxSteps = steps
+	}
+	if *timeout == 0 {
+		*timeout = deadline
+	}
+	if *task == "" {
+		*task = fmt.Sprintf(taskFormat, *namespace)
 	}
 
-	cfg, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	rules := clientcmd.NewDefaultClientConfigLoadingRules() // the same lookup kubectl uses
+	rules.ExplicitPath = *kubeconfig
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
 	if err != nil {
 		log.Fatalf("loading kubeconfig: %v", err)
 	}
@@ -63,36 +62,28 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	kube := tools.New(clientset, *namespace)
+	toolbox := tools.New(clientset, *namespace)
 
 	if *dump {
-		if err := dumpTools(ctx, kube, *pod, *previous); err != nil {
+		if err := dumpTools(ctx, toolbox, *pod, *previous); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
-
-	prompt := agent.SystemPrompt
-	defaultTask := "Namespace %s has a broken workload. Diagnose the root cause."
 	if *allowWrites {
-		kube.EnableWrites()
-		prompt = agent.RepairPrompt
-		defaultTask = "Namespace %s has a broken workload. Diagnose and repair it."
-	}
-	if *task == "" {
-		*task = fmt.Sprintf(defaultTask, *namespace)
+		toolbox.EnableWrites()
 	}
 
 	config := llm.DefaultConfig(prompt)
 	config.Model = llm.ResolveModel(*model)
-	client := llm.New(config, kube.Specs())
+	client := llm.New(config, toolbox.Specs())
 	run := &telemetry.Run{Model: client.Model()}
-	diagnoser := agent.New(client, kube, run, *maxSteps) //init agent
+	ag := agent.New(client, toolbox, run, *maxSteps) //init agent
 	if *verbose {
-		diagnoser.OnStep = printStep
+		ag.OnStep = func(info agent.StepInfo) { printStep(run, info) }
 	}
 
-	result, err := diagnoser.Run(ctx, *task)
+	result, err := ag.Run(ctx, *task)
 	if err != nil {
 		log.Fatalf("agent run: %v", err)
 	}
@@ -103,13 +94,7 @@ func main() {
 		fmt.Printf("%s\n", result.Answer)
 	}
 	fmt.Println("\n------------TOTAL METRICS------------")
-	fmt.Printf("\nsteps %d  in %d (uncached 1x)  out %d  cache_write %d (1.25x)  cache_read %d (0.05x)\n",
-		run.Steps,
-		run.Usage.InputTokens,
-		run.Usage.OutputTokens,
-		run.Usage.CacheWriteTokens,
-		run.Usage.CacheReadTokens,
-	)
+	fmt.Printf("\nsteps %d  %s\n", run.Steps, run.UsageLine(run.Usage))
 	if cost, known := run.CostUSD(); known {
 		fmt.Printf("cost $%.4f (%s)\n", cost, run.Model)
 	} else {
@@ -117,7 +102,7 @@ func main() {
 	}
 
 	if *allowWrites {
-		applied := kube.Applied()
+		applied := toolbox.Applied()
 		fmt.Printf("\n------------PATCHES APPLIED (%d)------------\n", len(applied))
 		for i, p := range applied {
 			fmt.Printf("%d. %s/%s  %s\n", i+1, strings.ToLower(p.Kind), p.Name, p.Patch)
@@ -125,15 +110,8 @@ func main() {
 	}
 }
 
-func printStep(info agent.StepInfo) {
-	fmt.Printf("step %d  %s  in %d (uncached 1x)  out %d  cache_write %d (1.25x)  cache_read %d (0.05x)\n",
-		info.N,
-		info.Elapsed.Round(time.Millisecond),
-		info.Usage.InputTokens,
-		info.Usage.OutputTokens,
-		info.Usage.CacheWriteTokens,
-		info.Usage.CacheReadTokens,
-	)
+func printStep(run *telemetry.Run, info agent.StepInfo) {
+	fmt.Printf("step %d  %s  %s\n", info.N, info.Elapsed.Round(time.Millisecond), run.UsageLine(info.Usage))
 
 	if text := strings.TrimSpace(info.Text); text != "" && len(info.Calls) != 0 {
 		fmt.Printf("  %s\n", firstLine(text, 160))
@@ -157,32 +135,18 @@ func firstLine(s string, max int) string {
 	return s
 }
 
-func dumpTools(ctx context.Context, kube *tools.Toolbox, pod string, previous bool) error {
-	pods, err := kube.GetPods(ctx)
-	if err != nil {
-		return fmt.Errorf("get pods: %w", err)
+func dumpTools(ctx context.Context, toolbox *tools.Toolbox, pod string, previous bool) error {
+	args, _ := json.Marshal(map[string]any{"pod": pod, "previous": previous}) // tools that take no arguments ignore these
+	for _, spec := range toolbox.Specs() {
+		if spec.Name == "get_logs" && pod == "" {
+			continue
+		}
+		out, err := toolbox.Dispatch(ctx, spec.Name, args)
+		if err != nil {
+			return fmt.Errorf("%s: %w", spec.Name, err)
+		}
+		fmt.Println("\n ------------Tool------------ %s\n", spec.Name)
+		fmt.Print(out)
 	}
-	fmt.Print(pods)
-
-	events, err := kube.GetEvents(ctx)
-	if err != nil {
-		return fmt.Errorf("get events: %w", err)
-	}
-	fmt.Print(events)
-
-	deployments, err := kube.GetDeployments(ctx)
-	if err != nil {
-		return fmt.Errorf("get deployments: %w", err)
-	}
-	fmt.Print(deployments)
-
-	if pod == "" {
-		return nil
-	}
-	logs, err := kube.GetLogs(ctx, pod, previous)
-	if err != nil {
-		return fmt.Errorf("get logs: %w", err)
-	}
-	fmt.Print(logs)
 	return nil
 }
