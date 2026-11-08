@@ -12,12 +12,12 @@ func Specs() []Spec {
 	return []Spec{
 		{
 			Name:        "get_pods",
-			Description: "List every pod in the namespace with its phase, ready count, restart count, and the reason any container is unhealthy. Start here.",
+			Description: "List every pod in the namespace with its phase, ready count, restart count (none, 1, several or many), and for any unhealthy container its waiting reason and last exit code.",
 			Properties:  map[string]any{},
 		},
 		{
 			Name:        "get_events",
-			Description: "List the namespace's recent events, oldest first, with repeat counts. Events explain image pull and scheduling failures that pod status alone does not.",
+			Description: "List the namespace's 20 most recent events, oldest first. Events that happened more than once are marked (repeated). Events explain image pull, scheduling and probe failures that pod status alone does not. Events expire about an hour after they last occur, so one-time events from an older failure may be missing.",
 			Properties:  map[string]any{},
 		},
 		{
@@ -27,7 +27,7 @@ func Specs() []Spec {
 		},
 		{
 			Name:        "get_logs",
-			Description: "Return the last 50 log lines from a pod. Set previous=true to read the log of the container's previous, crashed instance, which is where a CrashLoopBackOff cause is visible.",
+			Description: "Return the last 50 log lines from a pod's main container. By default this is the most recent attempt, including one that has already exited, which is usually where a crash's cause is printed.",
 			Properties: map[string]any{
 				"pod": map[string]any{
 					"type":        "string",
@@ -35,7 +35,7 @@ func Specs() []Spec {
 				},
 				"previous": map[string]any{
 					"type":        "boolean",
-					"description": "Read the previous container instance's log instead of the current one.",
+					"description": "Read the attempt before the most recent one. Only needed when the container is running again and the crash you care about was earlier.",
 				},
 			},
 			Required: []string{"pod"},
