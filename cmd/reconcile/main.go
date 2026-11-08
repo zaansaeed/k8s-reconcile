@@ -36,7 +36,19 @@ func main() {
 	dump := flag.Bool("dump", false, "print raw tool output and exit instead of running the agent")
 	pod := flag.String("pod", "", "with -dump, pod to read logs from; skipped when empty")
 	previous := flag.Bool("previous", false, "with -dump, read the previous container instance's log")
+	allowWrites := flag.Bool("allow-writes", false, "let the agent patch deployments and wait for rollouts; uses the repair prompt")
 	flag.Parse()
+
+	if *allowWrites { // repair runs wait on rollouts, so give them more time unless the user chose
+		explicit := map[string]bool{}
+		flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+		if !explicit["timeout"] {
+			*timeout = 15 * time.Minute
+		}
+		if !explicit["max-steps"] {
+			*maxSteps = 25
+		}
+	}
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	if err != nil {
@@ -60,13 +72,20 @@ func main() {
 		return
 	}
 
+	prompt, specs := agent.SystemPrompt, tools.Specs()
+	defaultTask := "Namespace %s has a broken workload. Diagnose the root cause."
+	if *allowWrites {
+		kube.EnableWrites()
+		prompt, specs = agent.RepairPrompt, append(specs, tools.WriteSpecs()...)
+		defaultTask = "Namespace %s has a broken workload. Diagnose and repair it."
+	}
 	if *task == "" {
-		*task = fmt.Sprintf("Namespace %s has a broken workload. Diagnose the root cause.", *namespace)
+		*task = fmt.Sprintf(defaultTask, *namespace)
 	}
 
-	config := llm.DefaultConfig(agent.SystemPrompt)
+	config := llm.DefaultConfig(prompt)
 	config.Model = llm.ResolveModel(*model)
-	client := llm.New(config, tools.Specs())
+	client := llm.New(config, specs)
 	run := &telemetry.Run{Model: client.Model()}
 	diagnoser := agent.New(client, kube, run, *maxSteps) //init agent
 	if *verbose {
@@ -95,6 +114,14 @@ func main() {
 		fmt.Printf("cost $%.4f (%s)\n", cost, run.Model)
 	} else {
 		fmt.Printf("cost unknown: no price for %s in telemetry/cost.go\n", run.Model)
+	}
+
+	if *allowWrites {
+		applied := kube.Applied()
+		fmt.Printf("\n------------PATCHES APPLIED (%d)------------\n", len(applied))
+		for i, p := range applied {
+			fmt.Printf("%d. %s/%s  %s\n", i+1, strings.ToLower(p.Kind), p.Name, p.Patch)
+		}
 	}
 }
 

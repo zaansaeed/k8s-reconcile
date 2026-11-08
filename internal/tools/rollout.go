@@ -19,9 +19,13 @@ const (
 	maxRolloutWait     = 120 * time.Second
 )
 
-// rolloutPoll is how often the deployment is re-read while waiting. It is a
-// variable so a quick check can shorten it.
-var rolloutPoll = 2 * time.Second
+// rolloutPoll is how often the deployment is re-read while waiting, and
+// rolloutSettle is how long the new pods must stay up before a rollout counts
+// as complete. Both are variables so a quick check can shorten them.
+var (
+	rolloutPoll   = 2 * time.Second
+	rolloutSettle = 10 * time.Second
+)
 
 // rolloutState is the verdict on a rollout at one moment.
 type rolloutState int
@@ -30,6 +34,7 @@ const (
 	rolloutInProgress rolloutState = iota
 	rolloutComplete
 	rolloutFailed
+	rolloutUnstable
 )
 
 // WaitForRollout polls a deployment until its rollout completes, fails, or the
@@ -44,6 +49,7 @@ func (t *Tools) WaitForRollout(ctx context.Context, name string, timeout time.Du
 	}
 
 	deadline := time.Now().Add(timeout)
+	var stableSince time.Time
 	for {
 		d, err := t.client.AppsV1().Deployments(t.namespace).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -54,8 +60,26 @@ func (t *Tools) WaitForRollout(ctx context.Context, name string, timeout time.Du
 		}
 
 		state, detail := rolloutStatus(d)
-		if state != rolloutInProgress || !time.Now().Before(deadline) {
-			return t.rolloutReport(ctx, d, state, detail, timeout)
+		if state == rolloutComplete { // deployed is not the same as staying up, so check the pods too
+			problem, err := t.unstablePod(ctx, d)
+			if err != nil {
+				return "", err
+			}
+			if problem != "" {
+				return t.rolloutReport(ctx, d, rolloutUnstable, problem, timeout)
+			}
+			if stableSince.IsZero() {
+				stableSince = time.Now()
+			}
+			if time.Since(stableSince) >= rolloutSettle {
+				detail += fmt.Sprintf(", and stayed up without restarting for %s", rolloutSettle)
+				return t.rolloutReport(ctx, d, rolloutComplete, detail, timeout)
+			}
+		} else {
+			stableSince = time.Time{}
+			if state == rolloutFailed || !time.Now().Before(deadline) {
+				return t.rolloutReport(ctx, d, state, detail, timeout)
+			}
 		}
 
 		select {
@@ -95,6 +119,38 @@ func rolloutStatus(d *appsv1.Deployment) (rolloutState, string) {
 	}
 }
 
+// unstablePod looks for a pod of the deployment that has restarted, is waiting
+// or has exited. Without a readiness probe, a crash-looping container counts as
+// available in the moments it runs, so rollout status alone can't catch it.
+// It returns "" when every pod looks stable.
+func (t *Tools) unstablePod(ctx context.Context, d *appsv1.Deployment) (string, error) {
+	selector, err := metav1.LabelSelectorAsSelector(d.Spec.Selector)
+	if err != nil {
+		return "", fmt.Errorf("reading selector of deployment %s: %w", d.Name, err)
+	}
+	pods, err := t.client.CoreV1().Pods(t.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return "", fmt.Errorf("listing pods of deployment %s: %w", d.Name, err)
+	}
+
+	for _, p := range pods.Items {
+		if p.DeletionTimestamp != nil || p.Status.Phase == corev1.PodSucceeded { // old pods on their way out
+			continue
+		}
+		for _, c := range p.Status.ContainerStatuses {
+			switch {
+			case c.State.Waiting != nil:
+				return fmt.Sprintf("pod %s container %s is waiting: %s", p.Name, c.Name, c.State.Waiting.Reason), nil
+			case c.State.Terminated != nil:
+				return fmt.Sprintf("pod %s container %s has exited: %s (exit %d)", p.Name, c.Name, c.State.Terminated.Reason, c.State.Terminated.ExitCode), nil
+			case c.RestartCount > 0:
+				return fmt.Sprintf("pod %s container %s has restarted %d times", p.Name, c.Name, c.RestartCount), nil
+			}
+		}
+	}
+	return "", nil
+}
+
 // rolloutReport states the verdict and why, then lists every pod in the
 // namespace, since a fix to one deployment can leave another still broken.
 func (t *Tools) rolloutReport(ctx context.Context, d *appsv1.Deployment, state rolloutState, detail string, waited time.Duration) (string, error) {
@@ -104,6 +160,8 @@ func (t *Tools) rolloutReport(ctx context.Context, d *appsv1.Deployment, state r
 		fmt.Fprintf(&b, "rollout of deployment/%s complete: %s.\n", d.Name, detail)
 	case rolloutFailed:
 		fmt.Fprintf(&b, "rollout of deployment/%s failed: %s.\n", d.Name, detail)
+	case rolloutUnstable:
+		fmt.Fprintf(&b, "rollout of deployment/%s deployed but not stable: %s.\n", d.Name, detail)
 	default:
 		fmt.Fprintf(&b, "rollout of deployment/%s not finished after %s: %s.\n", d.Name, waited, detail)
 	}

@@ -36,7 +36,7 @@ func WriteSpecs() []Spec {
 		{
 			Name: "wait_for_rollout",
 			Description: "Wait for a deployment's rollout to finish after a patch, then report the outcome and the current state of every pod in the namespace. " +
-				"Complete means every pod runs the new template and is available. If it is not finished when the timeout ends, the report says why, such as a new pod that keeps crashing. " +
+				"Complete means every pod runs the new template, is available, and has stayed up for a short settling period without restarting. A rollout can be deployed but not stable, for example when the new pods keep crashing; the report says which pod and why. If it is not finished when the timeout ends, the report says what it is still waiting for. " +
 				"A fix can reveal a second fault that the first one was hiding, so read the pods in the report before deciding you are done.",
 			Properties: map[string]any{
 				"name": map[string]any{
