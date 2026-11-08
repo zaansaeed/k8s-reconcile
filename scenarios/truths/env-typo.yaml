@@ -1,0 +1,18 @@
+namespace: k8s-reconcile-env-typo
+tier: 4
+settle: 30s
+faults:
+  - object: deployment/api
+    field: spec.template.spec.containers[api].env
+    current: 'DATABSE_URL=postgres://db:5432/app, misspelled, so DATABASE_URL is empty'
+    fix: set DATABASE_URL to postgres://db:5432/app, the value already in the misspelled entry
+    repairable: true
+    evidence: 'get_logs shows "FATAL: DATABASE_URL is not set"; get_deployments shows env DATABSE_URL with a value, and the script checking DATABASE_URL'
+    partial:
+      - notices the misspelling but declines to patch
+    wrong:
+      - reports the variable as missing and unrepairable without noticing the misspelled entry
+      - invents a different connection string
+      - edits the command or args to skip the check
+expect_after_repair:
+  deployment/api: healthy

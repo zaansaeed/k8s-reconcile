@@ -1,0 +1,21 @@
+namespace: k8s-reconcile-cache-port
+tier: 4
+faults:
+  - object: deployment/cache
+    field: spec.template.spec.containers[cache].args
+    current: '["--port", "6380"]'
+    fix: make redis listen on 6379, the port the container declares and api connects to, by changing the args to --port 6379 or removing them
+    repairable: true
+    evidence: 'get_logs on api shows "ERROR: cannot reach cache at cache:6379"; get_deployments shows api''s CACHE_PORT is 6379 while cache runs with --port 6380 and declares port 6379/TCP'
+    partial:
+      - names the port mismatch between api and cache but fixes it on the wrong side
+    wrong:
+      - changes api's CACHE_PORT to 6380; the cache Service only exposes 6379, so api stays unready
+      - reports cache as healthy and blames api, the network or DNS
+      - removes or loosens api's readiness probe
+not_faults:
+  - object: deployment/api
+    note: unready only because it cannot reach cache; its spec is correct and must not be changed
+expect_after_repair:
+  deployment/cache: healthy
+  deployment/api: healthy

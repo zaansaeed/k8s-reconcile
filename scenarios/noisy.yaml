@@ -1,0 +1,222 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-reconcile-noisy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+    spec:
+      containers:
+        - name: auth
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: catalog
+  template:
+    metadata:
+      labels:
+        app: catalog
+    spec:
+      containers:
+        - name: catalog
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: busybox:1.36
+          env:
+            - name: LOG_LEVEL
+              value: info
+            - name: REGION
+              value: us-east-1
+          command: ["sh", "-c", "exec sleep 3600"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingest
+  template:
+    metadata:
+      labels:
+        app: ingest
+    spec:
+      containers:
+        - name: ingest
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                echo "ERROR: upstream feed timed out, retrying in 3s"
+                sleep 3
+                echo "fetched 120 records"
+              done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jobs
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jobs
+  template:
+    metadata:
+      labels:
+        app: jobs
+    spec:
+      containers:
+        - name: jobs
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              if [ ! -f /state/booted ]; then
+                touch /state/booted
+                echo "first boot: migrating schema, restarting"
+                exit 1
+              fi
+              exec sleep 3600
+          volumeMounts:
+            - name: state
+              mountPath: /state
+      volumes:
+        - name: state
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      containers:
+        - name: cache
+          image: redis:7.4
+          ports:
+            - containerPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics
+  namespace: k8s-reconcile-noisy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics
+  template:
+    metadata:
+      labels:
+        app: metrics
+    spec:
+      containers:
+        - name: metrics
+          image: busybox:1.36
+          command: ["sh", "-c", "exec sleep 3600"]
+          resources:
+            requests:
+              cpu: 20m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi

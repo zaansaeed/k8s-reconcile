@@ -1,0 +1,525 @@
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1: Port mismatch between api and cache**
+
+- **Faulty object:** deployment/api (the client), with the cache deployment as the other side of the mismatch.
+- **Wrong field:** deployment/api, container `api`, env `CACHE_PORT` = `"6379"`. The cache container is started with `args: ["--port" "6380"]` on deployment/cache, so Redis listens on 6380, not 6379.
+- **Fix:** Make the two agree. The simplest change is to set `CACHE_PORT` on deployment/api to `"6380"`. Alternatively, remove the `--port 6380` arg from deployment/cache so Redis uses its default 6379, which matches the existing `containerPort: 6379`. Either change should work. Pick one and keep the cache Service and port in step with it.
+- **Evidence:**
+  - get_deployments: deployment/api has `CACHE_PORT: "6379"`, a readiness probe that runs `nc -z cache 6379`, and `Available=False`. deployment/cache runs `redis:7.4` with `args: ["--port" "6380"]`.
+  - get_pods: `api-6bdd974567-fg622` is Running with ready=0/1. `cache-7554d5445f-zvgfv` is ready=1/1, so the cache itself is healthy.
+  - get_logs on `api-6bdd974567-fg622`: repeated `ERROR: cannot reach cache at cache:6379`. The api's readiness probe uses the same check, so it fails and the pod stays unready.
+
+I did not call get_events, so I have no event-level confirmation of the probe failures. The cause above is established from the deployment spec and the api logs.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2109 (uncached 1x)  out 859  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is healthy. There were two faults, both in the cache/api port contract, and I fixed them with two patches to the `cache` deployment and one revert on `api`.
+
+**Fault 1: `Deployment/cache`: Redis started on the wrong port**
+- **What was wrong:** the container was started with `args: ["--port", "6380"]`. The container declares `containerPort: 6379`, and the api connects to `cache:6379`. Redis logged `Running mode=standalone, port=6380`, so nothing answered on 6379.
+- **Patch:** set `args` to `["--port", "6379"]`.
+- **Rollout result:** complete. The new pod `cache-6d587c6cd7-6c4nr` is 1/1 ready and stayed up for 10s without restarting.
+
+**Fault 2: `Deployment/api`: not ready because it could not reach the cache**
+- **What was wrong:** the readiness probe runs `nc -z cache 6379`, and the api logged `ERROR: cannot reach cache at cache:6379` on every check. The api's original `CACHE_PORT=6379` was correct. The problem was the cache side from fault 1.
+- **Patches:** I first changed `CACHE_PORT` to `6380` to match the broken cache. That was the wrong side to change. Once the cache was fixed, I reverted `CACHE_PORT` to `6379`, so the api's pod template matches its original definition.
+- **Rollout result:** the final revert reported complete. The api deployment is now available, and its current ReplicaSet `api-6bdd974567` is 1/1 ready and has not restarted.
+
+**Current state**
+- `deployment/api`: available, 1/1 ready.
+- `deployment/cache`: available, 1/1 ready.
+- Pods: `api-6bdd974567-558s2` is 1/1 ready, `cache-6d587c6cd7-6c4nr` is 1/1 ready.
+- One leftover pod, `api-b587cc64c-mm8wp`, is still 0/1 ready. It belongs to an older ReplicaSet from my intermediate `6380` change, and the deployment no longer uses that template. It should be scaled down by the controller. I cannot delete pods with these tools, so if it stays, it needs manual removal. It does not affect the deployment's availability.
+
+------------TOTAL METRICS------------
+
+steps 9  in 43690 (uncached 1x)  out 3794  cache_write 2039 (1.25x)  cache_read 16312 (0.1x)
+cost $0.0067 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (3)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6380"}]}]}}}}
+2. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+3. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-slow-start 
+recreated k8s-reconcile-slow-start, waiting 1m20s for it to settle
+
+**Fault: liveness probe kills the web container before httpd starts**
+
+- **Object:** `deployment/web` (pod `web-5b84654b-fbrjq`, owned by ReplicaSet `web-5b84654b`)
+- **Field:** `livenessProbe` = HTTP GET `/` on port 80, `initialDelaySeconds=2`, `periodSeconds=3`, `failureThreshold=1`. The probe starts too early and allows no failures.
+- **Fix:** Raise the initial delay above the startup time, which is about 15 s plus setup. For example, set `initialDelaySeconds` to 30 or more, and raise `failureThreshold` to 3 or more. Alternatively, add a `startupProbe` with a generous budget and keep the liveness probe for steady state. Optionally, remove the `sleep 15` from the command if it is not needed.
+- **Evidence:**
+  - `get_deployments`: the container command runs `echo "starting: warming cache"`, then `sleep 15`, and only then runs `httpd` on port 80. The liveness probe timing is as above.
+  - `get_pods`: the container is `CrashLoopBackOff` with last exit `Error (exit 137)`, meaning it was killed, and it is 0/1 ready with several restarts.
+  - `get_events`: repeated `Unhealthy: Liveness probe failed: ... connect: connection refused` on port 80, followed by repeated `Killing: Container web failed liveness probe, will be restarted`, then BackOff.
+  - `get_logs`: only `starting: warming cache` appears. The process never reaches `listening on :80`, which confirms the probe fired during the warm-up sleep.
+
+The deployment's Progressing condition reports success because the ReplicaSet was created. Availability is False because the pod never becomes ready.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1985 (uncached 1x)  out 822  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-slow-start 
+recreated k8s-reconcile-slow-start, waiting 1m20s for it to settle
+
+The namespace is healthy now. There was one fault, and I fixed it.
+
+**Fault: `deployment/web` was being killed by its liveness probe before it could start.**
+- **What was wrong:** The container runs `sleep 15` before it starts httpd on port 80. The liveness probe began checking at 2 seconds with a failure threshold of 1. The probe got "connection refused," the kubelet restarted the container, and the cycle repeated, which put the pod into CrashLoopBackOff. The logs showed only `starting: warming cache`, which confirmed the container was still warming up when it was killed.
+- **Patch applied:** I set the liveness probe's `initialDelaySeconds` to 30 on container `web`. I left the path, port, period and failure threshold unchanged, so the probe still checks the real endpoint.
+- **Rollout result:** Complete. One new pod (`web-674f5ccf7c-djnrt`) is running, ready 1/1, with no restarts, and it stayed up through the settling period.
+
+------------TOTAL METRICS------------
+
+steps 5  in 7007 (uncached 1x)  out 1067  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/web  {"spec":{"template":{"spec":{"containers":[{"name":"web","livenessProbe":{"initialDelaySeconds":30}}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-env-typo 
+recreated k8s-reconcile-env-typo, waiting 30s for it to settle
+
+**Fault: `deployment/api`**
+
+- **Field:** `spec.template.spec.containers[api].env` has the variable name misspelled as `DATABSE_URL` (value `postgres://db:5432/app`). The script checks `DATABASE_URL`, which is never set.
+- **Fix:** Rename the env var to `DATABASE_URL` (keep the same value). The rollout will then create a pod that passes the check.
+- **Evidence:**
+  - get_deployments: the env entry is `DATABSE_URL`, and the container command exits 1 when `$DATABASE_URL` is empty.
+  - get_pods: `api-6c68844f49-pcfcb` is Running with ready=0/1 and several restarts, last exit code 1.
+  - get_logs on `api-6c68844f49-pcfcb`: `FATAL: DATABASE_URL is not set`.
+
+No other unhealthy workloads were reported. I did not call get_events, because the logs and deployment spec already account for the failure.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1385 (uncached 1x)  out 569  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0005 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-env-typo 
+recreated k8s-reconcile-env-typo, waiting 30s for it to settle
+
+There was one fault, and it is fixed. The namespace is healthy.
+
+**Fault: `deployment/api`**
+- **What was wrong:** The container's env var was misspelled as `DATABSE_URL`, so the app never received `DATABASE_URL`. The startup check (`if [ -z "$DATABASE_URL" ]`) failed on every start with `FATAL: DATABASE_URL is not set`, exit 1, and the pod went into CrashLoopBackOff.
+- **Patch applied:** I renamed the env entry to `DATABASE_URL` and kept its value, `postgres://db:5432/app`. I also deleted the misspelled `DATABSE_URL` entry. The value came from the existing deployment spec, not from an outside guess.
+- **Rollout result:** The rollout completed. One of one pods runs the new template and is available. It stayed up without restarting for 10 seconds. The current pod is `api-5cbf9d56d6-t2s2x`, Running, 1/1 ready, no restarts.
+
+The namespace is now healthy. `get_pods` shows only that one pod, and it is ready.
+
+------------TOTAL METRICS------------
+
+steps 5  in 6023 (uncached 1x)  out 1131  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DATABASE_URL","value":"postgres://db:5432/app"},{"name":"DATABSE_URL","$patch":"delete"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-noisy 
+recreated k8s-reconcile-noisy, waiting 15s for it to settle
+
+**Root cause: `deployment/catalog` has a readiness probe path that nginx does not serve.**
+
+- **Object:** `deployment/catalog` (pod `catalog-5f58dcdf5d-2nlfq`, 0/1 ready, Available=False, MinimumReplicasUnavailable)
+- **Wrong field:** `readinessProbe.httpGet.path` is `/healthz` on port 80. The container is `nginx:1.27`, which has no `/healthz` route, so it returns 404.
+- **Fix:** Point the readiness probe at a path the app actually serves, such as `/`, which the frontend deployment uses successfully. Alternatively, add a real `/healthz` endpoint to the image or config. Either change must be made in the deployment spec.
+- **Evidence:**
+  - get_pods: catalog is Running but ready=0/1, with no restarts. The container is alive, so only readiness is failing.
+  - get_deployments: catalog's readiness probe is `http GET /healthz on port 80`, and the image is `nginx:1.27`. Frontend, by contrast, probes `/`.
+  - get_events: repeated `Readiness probe failed: HTTP probe failed with statuscode: 404` for `http://10.244.0.157:80/healthz`.
+  - get_logs (catalog): nginx started normally and listens on port 80. Each probe logs `GET /healthz 404` and `open() "/usr/share/nginx/html/healthz" failed (No such file or directory)`.
+
+**Not faults:**
+- **jobs** (`jobs-589db47449-srrhz`, restarts=1, last exit 1): The script exits 1 only when `/state/booted` is missing. It creates that file on the first run, so the restart is the intended one-time "first boot" exit. The pod is now ready 1/1 and the deployment is Available. Its emptyDir state survives the container restart, so this is not a crash loop.
+- **ingest** (`ingest-659f87979f-zqdtg`): It prints `ERROR: upstream feed timed out` in a loop, but the shell loop keeps running and the pod is 1/1 ready with no restarts. This is log noise, not the outage. Its logs were not pulled and nothing in the status points to a fault there.
+
+------------TOTAL METRICS------------
+
+steps 3  in 7220 (uncached 1x)  out 1133  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-noisy 
+recreated k8s-reconcile-noisy, waiting 15s for it to settle
+
+The namespace is healthy now. One fault was broken and I fixed it. The other items I looked at were not broken, so I left them alone.
+
+**Fault 1: `deployment/catalog`**
+- **What was wrong:** The readiness probe was an HTTP GET on `/healthz` port 80. The nginx:1.27 image serves only its default page, so `/healthz` returned 404 and the pod never became ready. The catalog logs showed `open() "/usr/share/nginx/html/healthz" failed` for every probe. The web server itself was fine.
+- **Patch applied:** Changed the readiness probe path from `/healthz` to `/`, the same path the frontend deployment uses. The probe settings were otherwise unchanged.
+- **Rollout result:** Complete. The new pod `catalog-b97755c74-mv877` is 1/1 ready and stayed up for 10s without restarting. The deployment is available.
+
+**Not changed:**
+- **`deployment/jobs`:** The pod restarted once. Its previous log shows `first boot: migrating schema, restarting`. The command is written to exit 1 on the first boot and then run normally, and the marker file is on an emptyDir. The current pod `jobs-589db47449-jdprj` is 1/1 running, so this is expected behaviour and not an ongoing fault. No patch was needed.
+- **`deployment/ingest`:** It is healthy by status and keeps logging `ERROR: upstream feed timed out`. That is an application-level message, not a Kubernetes fault, and the task does not cover it. I did not change it. If the feed timeout matters, whoever owns the upstream feed needs to look at it.
+
+------------TOTAL METRICS------------
+
+steps 4  in 14835 (uncached 1x)  out 1487  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0023 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/catalog  {"spec":{"template":{"spec":{"containers":[{"name":"catalog","readinessProbe":{"httpGet":{"path":"/","port":80}}}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1: Port mismatch between api and cache (root cause)**
+
+- **Faulty object:** `deployment/cache`
+- **Field:** `spec.template.spec.containers[cache].args` is `["--port", "6380"]`. Redis therefore listens on 6380, while the Service/port the container declares is 6379 and the api expects 6379.
+- **Fix:** Change the cache args to `["--port", "6379"]`, or change `CACHE_PORT` in `deployment/api` to `"6380"` and keep the container port consistent with whichever value is chosen. Aligning on 6379 matches the api's existing config and the declared container port.
+- **Evidence:**
+  - get_deployments: cache args `["--port" "6380"]`, container port `6379/TCP`; api env `CACHE_PORT=6379`, `CACHE_HOST=cache`.
+  - get_logs (cache pod): "Running mode=standalone, port=6380. Ready to accept connections tcp". Redis is listening on 6380 only.
+  - get_logs (api pod): repeated "ERROR: cannot reach cache at cache:6379", so the api's `nc -z` probe fails.
+  - get_pods: api `ready=0/1`, `Running`, no restarts. The readiness probe is failing, which is why the api deployment reports `Available=False`, `MinimumReplicasUnavailable`.
+
+**Notes**
+- The cache pod itself is healthy (`Running`, `ready=1/1`). The fault is in configuration, not in the cache process.
+- I did not call get_events. The logs and deployment spec are sufficient to explain the failure.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2439 (uncached 1x)  out 833  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is healthy. Both deployments are available and their pods are ready. There were two faults, and one of my patches was wrong, which I reverted.
+
+**Fault 1: `deployment/cache` started Redis on the wrong port**
+- **What was wrong:** The container was started with `args: ["--port", "6380"]`, so Redis listened on 6380. Its declared containerPort and the port the api expects were both 6379. Logs showed `Running mode=standalone, port=6380`.
+- **Patch applied:** Removed the `args` override (`args: null`), so Redis uses its default port 6379.
+- **Rollout result:** Complete. 1 of 1 new pod available, stayed up without restarting for 10s. The new pod is `cache-84588965b8-shlmt`.
+
+**Fault 2: `deployment/api` could not reach the cache**
+- **What was wrong:** The readiness probe and loop check `$CACHE_HOST:$CACHE_PORT`, and `CACHE_PORT` was `6379`. The api logged `cannot reach cache at cache:6379` and stayed 0/1.
+- **Patch applied:** I first changed `CACHE_PORT` to `6380` to match the cache's Redis. That was wrong: the new api pod still could not connect on 6380, so the cache's Service evidently exposes 6379. I then reverted `CACHE_PORT` to `6379`, which is the original value, so the api's env is back to its original state. Its readiness probe was never changed.
+- **Rollout result:** Available. The api pod `api-6bdd974567-jgtgl` is now 1/1 ready with no restarts. The first attempt's pod `api-b587cc64c-jh8jf` was superseded and is being removed.
+
+**Notes:**
+- The cache change touches a deployment that reported healthy, but its Redis was on the wrong port for its declared 6379 contract and for the api. The api's probe and the Service expect 6379, so the cache was the side that drifted.
+- I did not check the cache Service object directly, since the tools do not expose Services. The 6380 failure from the api pod is the evidence that the Service maps 6379.
+
+------------TOTAL METRICS------------
+
+steps 8  in 39413 (uncached 1x)  out 3740  cache_write 0 (1.25x)  cache_read 16312 (0.1x)
+cost $0.0060 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (3)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6380"}]}]}}}}
+2. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+3. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":null}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-slow-start 
+recreated k8s-reconcile-slow-start, waiting 1m20s for it to settle
+
+**Fault 1: Liveness probe kills `web` before httpd starts**
+
+- **Object:** `deployment/web` (pod `web-5b84654b-mh4sm`, ReplicaSet `web-5b84654b`)
+- **Field:** `livenessProbe` — `initialDelaySeconds=2`, `periodSeconds=3`, `failureThreshold=1`, HTTP GET `/` on port 80. The probe is too aggressive for this startup.
+- **Current behaviour:** The container command runs `echo "starting: warming cache"`, then `sleep 15`, and only after that creates `/www` and execs `httpd` on port 80. The probe starts at 2s and fails on its first attempt because nothing is listening. With `failureThreshold=1`, one failure is enough to kill the container. The kill shows as exit 137, and the pod then goes into CrashLoopBackOff.
+- **Fix:** Make the probe tolerate the 15s warm-up. Either add a `startupProbe` on port 80 with a budget of about 30s+ (for example `periodSeconds=2`, `failureThreshold=20`), or raise the liveness `initialDelaySeconds` to at least 20 and `failureThreshold` to 3 or more. Alternatively, remove the `sleep 15` from the command so httpd listens promptly.
+- **Evidence:**
+  - `get_deployments`: the liveness probe settings above, and the command with `sleep 15` before `exec httpd`.
+  - `get_pods`: `web` is in CrashLoopBackOff with last exit 137, ready 0/1, restarts several.
+  - `get_events`: repeated `Unhealthy` events, "Liveness probe failed: connect: connection refused" on 10.244.0.178:80, followed by "Container web failed liveness probe, will be restarted" and BackOff.
+  - `get_logs`: the only output is "starting: warming cache". httpd never prints a listening line, which fits the process being killed during the sleep.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2030 (uncached 1x)  out 923  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0009 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-slow-start 
+recreated k8s-reconcile-slow-start, waiting 1m20s for it to settle
+
+The `web` deployment in `k8s-reconcile-slow-start` is repaired, and the namespace is healthy.
+
+**Fault: `deployment/web`, liveness probe firing before the app is ready**
+- **What was wrong:** The container runs `sleep 15` before it starts `httpd` on port 80. The liveness probe began at 2 seconds with a failure threshold of 1, so it got "connection refused" and killed the container every time. That left the pod in CrashLoopBackOff with exit 137. The events and logs both showed this, and the logs ended at "starting: warming cache".
+- **Patch applied:** I added a `startupProbe` to the `web` container: HTTP GET `/` on port 80, `periodSeconds: 2`, `failureThreshold: 30`. That gives the app up to about 60 seconds to start. The liveness probe only takes over after the startup probe succeeds. I left the liveness probe itself unchanged, so no health check was removed or loosened.
+- **Rollout result:** Complete. The new pod `web-564d8566d-bjnsb` is 1/1 ready with no restarts, and it stayed up for the 10-second settling period. The deployment reports Available=False in its stale status block, but the rollout report and pod list both show it running and ready.
+
+No other workloads were in the namespace, and nothing needed a value I couldn't supply.
+
+------------TOTAL METRICS------------
+
+steps 4  in 4845 (uncached 1x)  out 1253  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0012 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/web  {"spec":{"template":{"spec":{"containers":[{"name":"web","startupProbe":{"httpGet":{"path":"/","port":80},"periodSeconds":2,"failureThreshold":30}}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-env-typo 
+recreated k8s-reconcile-env-typo, waiting 30s for it to settle
+
+**Fault: `deployment/api`, env var name typo**
+
+- **Field:** `spec.template.spec.containers[api].env` has the name `DATABSE_URL` (value `postgres://db:5432/app`). The container's startup script checks `DATABASE_URL`, which is therefore unset.
+- **Fix:** Rename the env var from `DATABSE_URL` to `DATABASE_URL`, keeping the same value. Then roll the deployment out again.
+- **Evidence:**
+  - `get_deployments`: the env entry is `DATABSE_URL`, and the command args test `$DATABASE_URL`. The deployment reports `Available=False` with `MinimumReplicasUnavailable`.
+  - `get_pods`: `api-6c68844f49-wbdsm` is Running with ready=0/1, restarts=several, and last state Error (exit 1).
+  - `get_logs`: the pod prints `FATAL: DATABASE_URL is not set`, then exits.
+
+The pod is not crashing for any other reason. The only other fault visible is this one, and `get_events` was not needed to explain it.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1419 (uncached 1x)  out 640  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0005 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-env-typo 
+recreated k8s-reconcile-env-typo, waiting 30s for it to settle
+
+The namespace is healthy now. The only workload, `deployment/api`, had one fault, and it is fixed.
+
+**Fault: Deployment/api had a misspelled environment variable**
+- **What was wrong:** The container's env var was named `DATABSE_URL`, missing a "A". The startup script checks for `DATABASE_URL`, found it unset, printed `FATAL: DATABASE_URL is not set`, and exited 1. The kubelet kept restarting it, so the pod went into CrashLoopBackOff and never became ready. The logs and the deployment spec confirmed this.
+- **Patch applied:** I deleted the `DATABSE_URL` entry and added `DATABASE_URL` with the same literal value, `postgres://db:5432/app`. I did not change the value, the command, the probes, or anything else.
+- **Rollout result:** `rollout of deployment/api complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s.` The new pod `api-5cbf9d56d6-bzsx4` is Running, ready 1/1, with no restarts. The deployment reports Available=True.
+
+No other faults turned up, and nothing needs a value I don't have.
+
+------------TOTAL METRICS------------
+
+steps 5  in 6322 (uncached 1x)  out 1174  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DATABSE_URL","$patch":"delete"},{"name":"DATABASE_URL","value":"postgres://db:5432/app"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-noisy 
+recreated k8s-reconcile-noisy, waiting 15s for it to settle
+
+**Fault: catalog readiness probe path is wrong**
+
+- **Object:** `deployment/catalog`
+- **Field:** `spec.template.spec.containers[catalog].readinessProbe.httpGet.path` is `/healthz`
+- **Fix:** Change the readiness probe path to a path the nginx:1.27 image actually serves, such as `/`, which the frontend deployment uses successfully. Alternatively, add a `/healthz` endpoint to the application so it returns 200. The probe must match something the container serves.
+- **Evidence:**
+  - get_deployments: `catalog` has ready=0, available=0, `readiness probe: http GET /healthz on port 80`, and the Available condition is False.
+  - get_pods: `catalog-5f58dcdf5d-mb77t` is Running with ready=0/1 and no restarts. The container is up, so this is a readiness failure, not a crash.
+  - get_events: repeated `Readiness probe failed: HTTP probe failed with statuscode: 404` for that pod.
+  - get_logs: nginx returns `open() "/usr/share/nginx/html/healthz" failed (No such file or directory)` and answers the kube-probe with 404. Nginx itself is healthy.
+
+**Not causes of the outage:**
+- `deployment/jobs`: the one restart is the intended first-boot path (`exit 1` when `/state/booted` is missing). The pod is now Running, ready=1/1, and has not restarted again, so this is expected behaviour, not a fault.
+- `deployment/ingest`: its loop prints "ERROR: upstream feed timed out" but exits nothing and stays Running and ready. This is log noise, not the failure you asked about.
+
+------------TOTAL METRICS------------
+
+steps 3  in 7195 (uncached 1x)  out 920  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0012 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-noisy 
+recreated k8s-reconcile-noisy, waiting 15s for it to settle
+
+The namespace is healthy now: all eight pods are Running and ready. I fixed one fault.
+
+**Fault 1: `deployment/catalog`**
+- **What was wrong:** The readiness probe was an HTTP GET on `/healthz`. The nginx:1.27 image has no such file, so every check returned 404 and the pod never became ready. The catalog logs show the same thing: `open() "/usr/share/nginx/html/healthz" failed (2: No such file or directory)`. nginx itself was serving normally.
+- **Patch applied:** Changed the readiness probe path from `/healthz` to `/` on port 80, the same check the frontend deployment uses. The probe itself is still in place with its original timing; only the path changed.
+- **Rollout result:** Complete. The new pod `catalog-b97755c74-7kzcl` is 1/1 ready, available, and stayed up without restarting for 10s.
+
+**Not changed: `deployment/jobs`**
+- The pod restarted once with exit code 1. Its startup script exits 1 on the first boot, when `/state/booted` does not exist, to simulate a schema migration. On the next start the marker file exists, the script runs `sleep 3600`, and the pod has stayed ready since. The restart is a one-time event, so I made no change.
+
+**Also not changed: `deployment/ingest`**
+- Its logs print `ERROR: upstream feed timed out, retrying in 3s` on a loop, but the pod shows Ready. I did not look at its logs, so I can't say whether this needs action. It isn't part of the failure you asked about.
+
+------------TOTAL METRICS------------
+
+steps 4  in 14566 (uncached 1x)  out 1409  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0022 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/catalog  {"spec":{"template":{"spec":{"containers":[{"name":"catalog","readinessProbe":{"httpGet":{"path":"/","port":80}}}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+**Fault 1: cache port mismatch between `cache` and `api`**
+
+- **Faulty object:** `deployment/cache` (container `cache`), with the knock-on effect on `deployment/api`.
+- **Wrong field:** `deployment/cache` container `args: ["--port" "6380"]`. Redis listens on 6380 instead of the port in its declared `port: 6379/TCP`. `deployment/api` expects `CACHE_PORT` = `"6379"`, and its readiness probe runs `nc -z cache 6379`.
+- **Fix:** Make the two agree. The simplest change is to remove the `--port 6380` args from `deployment/cache` so Redis uses its default 6379. Alternatively, set `CACHE_PORT` on `deployment/api` to `"6380"`. Either way, the port the cache serves on must match the port the api connects to.
+- **Evidence:**
+  - `get_deployments`: cache args are `["--port" "6380"]`. api has `CACHE_PORT=6379` and a readiness probe on 6379. Cache is Available, and api is Available=False with 0/1 ready.
+  - `get_pods`: `api-6bdd974567-4gscz` is Running with ready=0/1. `cache-7554d5445f-cpgqj` is Running with ready=1/1 and no restarts.
+  - `get_logs` (api): repeated `ERROR: cannot reach cache at cache:6379`.
+  - `get_events`: repeated readiness probe failures on `pod/api-6bdd974567-4gscz`. The events show no image, scheduling or ConfigMap problems.
+
+The api pod is not crash-looping. It runs, but its readiness probe fails on every check, so the deployment never reaches minimum availability.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2675 (uncached 1x)  out 791  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-cache-port 
+recreated k8s-reconcile-cache-port, waiting 15s for it to settle
+
+The namespace is healthy now. There was one fault.
+
+**Fault: `deployment/cache` was starting redis on the wrong port.**
+- **What was wrong:** The cache container had `args: ["--port", "6380"]`, so redis listened on 6380. The container's declared port and the api's `CACHE_PORT` are both 6379. The api's readiness probe and its loop kept failing with `cannot reach cache at cache:6379`, which left `deployment/api` at 0/1 ready and unavailable.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}`. This changes only the args, so redis now listens on 6379. I did not change the api, its probe, or any env values.
+- **Rollout result:** The cache rollout completed. The new pod `cache-6d587c6cd7-fbpg5` stayed up without restarting for 10s and is 1/1 ready. The api pod `api-6bdd974567-vf22k` went to 1/1 ready with no restarts, and its logs now show `cache ok`.
+
+Final state: both deployments are available. `api` is 1/1 and `cache` is 1/1, with no restarts. No other workloads were found broken, and nothing needed a value I couldn't supply.
+
+------------TOTAL METRICS------------
+
+steps 5  in 10045 (uncached 1x)  out 1374  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0018 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/cache  {"spec":{"template":{"spec":{"containers":[{"name":"cache","args":["--port","6379"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-slow-start 
+recreated k8s-reconcile-slow-start, waiting 1m20s for it to settle
+
+**Fault: liveness probe is killing the web container before it starts listening.**
+
+- **Faulty object:** `deployment/web` (pod `web-5b84654b-sxm86`, owned by ReplicaSet `web-5b84654b`)
+- **Wrong field:** `livenessProbe` timing, `initialDelay=2s`, `period=3s`, `failureThreshold=1`. The container's startup takes longer than this.
+- **Why it's wrong:** The startup command runs `echo "starting: warming cache"`, then `sleep 15`, and only then creates `/www` and runs `exec httpd -f -p 80`. Nothing listens on port 80 for about 15 seconds. The probe begins at 2s and fails on its first miss, so the kubelet kills the container. That produces exit 137 and CrashLoopBackOff.
+- **Fix:** Add a `startupProbe` on HTTP GET / port 80 with enough budget to cover about 15s (for example, `periodSeconds: 2`, `failureThreshold: 15`). Alternatively, raise the liveness `initialDelaySeconds` to at least 20 and `failureThreshold` to 3 or more. Or remove the 15s sleep from the startup command if it isn't needed.
+- **Evidence:**
+  - get_pods: `web` container is waiting with CrashLoopBackOff, last exit was Error (exit 137), ready=0/1.
+  - get_deployments: the liveness probe settings above and the startup command with `sleep 15` before `httpd`.
+  - get_events: repeated `Unhealthy` events, "Liveness probe failed: connect: connection refused" on 10.244.0.206:80, followed by `Killing` events, "Container web failed liveness probe, will be restarted", and BackOff.
+  - get_logs: the only line is `starting: warming cache`. httpd never started before the kill.
+
+The deployment itself rolled out correctly. The ReplicaSet was created, and the Progressing condition is true. The fault is the probe, not the rollout.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2048 (uncached 1x)  out 964  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-slow-start 
+recreated k8s-reconcile-slow-start, waiting 1m20s for it to settle
+
+The namespace is healthy now. One workload was broken and one patch fixed it.
+
+**Fault: `deployment/web` (container `web`)**
+- **What was wrong:** The liveness probe (HTTP GET `/` on port 80, initialDelay 2s, period 3s, failureThreshold 1) started before the server was listening. The container prints "starting: warming cache", sleeps 15 seconds, and only then starts httpd on port 80. The first failed probe killed it, so it went into CrashLoopBackOff with exit 137. The logs confirmed this: the only line was the warm-up message.
+- **Patch applied:** I added a `startupProbe` (HTTP GET `/` on port 80, periodSeconds 2, failureThreshold 30, so up to 60 seconds to start). While the startup probe is running, liveness checks are held off. I left the liveness probe unchanged, so it still guards the container once it is up.
+- **Rollout result:** Complete. The new pod `web-564d8566d-qkbf8` is Running, ready 1/1, with no restarts. It stayed up for the settling period, and no old pods remain.
+
+No secrets, credentials or other objects needed changing, and nothing was left for you to supply.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5099 (uncached 1x)  out 1378  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/web  {"spec":{"template":{"spec":{"containers":[{"name":"web","startupProbe":{"httpGet":{"path":"/","port":80},"periodSeconds":2,"failureThreshold":30}}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-env-typo 
+recreated k8s-reconcile-env-typo, waiting 30s for it to settle
+
+**Fault: env var name typo in deployment/api**
+
+- **Faulty object:** `deployment/api` (container `api`, image `busybox:1.36`)
+- **Wrong field:** `env` name is `DATABSE_URL` (missing the second A). The value `postgres://db:5432/app` is attached to this misspelled name, so the variable the script checks, `DATABASE_URL`, is never set.
+- **Fix:** Rename the env entry from `DATABSE_URL` to `DATABASE_URL`, keeping the same value. This creates a new ReplicaSet and the pod should start.
+- **Evidence:**
+  - get_deployments: the env entry is named `DATABSE_URL`, and the container command exits 1 when `DATABASE_URL` is empty.
+  - get_logs on `api-6c68844f49-678n6`: `FATAL: DATABASE_URL is not set`, matching the script's exit path.
+  - get_pods: the pod is Running but 0/1 ready, with several restarts and last exit code 1.
+
+I did not call get_events. The log output and the deployment spec are enough to explain the fault.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1378 (uncached 1x)  out 607  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0005 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-env-typo 
+recreated k8s-reconcile-env-typo, waiting 30s for it to settle
+
+There was one fault, in `Deployment/api`, and it is now fixed.
+
+- **Faulty object:** `deployment/api`
+- **What was wrong:** The container's environment variable was misspelled as `DATABSE_URL`. The container's startup script checks for `DATABASE_URL`, found it unset, printed `FATAL: DATABASE_URL is not set`, and exited with code 1. That caused the crash loop. The logs and the BackOff events matched this.
+- **Patch applied:** I deleted the `DATABSE_URL` entry and added `DATABASE_URL` with the same value that was already set, `postgres://db:5432/app`. Nothing else in the template changed.
+- **Rollout result:** The rollout completed. One of one pods runs the new template, it is available, and it stayed up for 10 seconds without restarting. A follow-up `get_pods` shows `api-5cbf9d56d6-lng8c` Running with 1/1 ready and no restarts.
+
+The namespace is healthy now. It has one workload, and that workload is running and ready.
+
+------------TOTAL METRICS------------
+
+steps 5  in 5859 (uncached 1x)  out 1039  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0012 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DATABSE_URL","$patch":"delete"},{"name":"DATABASE_URL","value":"postgres://db:5432/app"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-noisy 
+recreated k8s-reconcile-noisy, waiting 15s for it to settle
+
+**Fault: `catalog` readiness probe path is wrong**
+
+- **Object:** `deployment/catalog`
+- **Field:** `readinessProbe.httpGet.path` is `/healthz` (port 80, period 5s, failureThreshold 3).
+- **Why it fails:** The container is `nginx:1.27`, which serves only `/` and has no `/healthz` file. The probe gets HTTP 404, so the pod never becomes Ready (`catalog-5f58dcdf5d-xjbgf` is Running with ready=0/1). The Deployment stays at `available=0` with `MinimumReplicasUnavailable`.
+- **Fix:** Change the readiness probe path to `/`, which is what `frontend` uses and which returns 200. Alternatively, add a real `/healthz` endpoint to the image or serve one from the container. Do not leave the probe pointing at a path that does not exist.
+- **Evidence:**
+  - `get_deployments`: catalog shows `available=0`, and its readiness probe is `http GET /healthz on port 80`.
+  - `get_events`: repeated `Unhealthy` warnings, "HTTP probe failed with statuscode: 404", on the catalog pod.
+  - `get_logs` (catalog pod): nginx logs `open() "/usr/share/nginx/html/healthz" failed (2: No such file or directory)` and returns `404` to `kube-probe` requests. The nginx process itself is up.
+
+**Not a fault: `jobs` restart**
+
+- `jobs-589db47449-zqr7k` has 1 restart with last exit 1. This is deliberate. The script exits 1 on first boot when `/state/booted` is missing, then runs `sleep 3600`. The emptyDir survives the container restart, so the second run stays up. It is Running, ready=1/1, and the Deployment is Available. I did not fetch its logs because the pod is healthy now.
+
+**Not a fault: `ingest` log noise**
+
+- `ingest` prints "ERROR: upstream feed timed out" in a loop. It is a fake error message from a busybox loop, and the pod is Running and ready. It does not cause the broken workload.
+
+------------TOTAL METRICS------------
+
+steps 3  in 7222 (uncached 1x)  out 1063  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-noisy 
+recreated k8s-reconcile-noisy, waiting 15s for it to settle
+
+The namespace is healthy now. I found one fault and fixed it.
+
+**Fault: Deployment/catalog, wrong readiness probe path**
+- **What was wrong:** The readiness probe checked `GET /healthz` on port 80. The container is `nginx:1.27`, which has no `/healthz` file, so every probe returned 404. The catalog log showed nginx running normally and answering each `/healthz` request with `open() ... No such file or directory`. The pod stayed at 0/1 ready, and the deployment stayed unavailable.
+- **Patch applied:** Changed the readiness probe path from `/healthz` to `/`, keeping port 80. This matches the frontend deployment, which probes `/` on the same image. I did not remove or loosen the probe.
+- **Rollout result:** Complete. One new pod (`catalog-b97755c74-sp4pt`) runs the new template, is 1/1 ready, and stayed up without restarting for 10s.
+
+**Not changed: Deployment/jobs, one restart**
+- The jobs pod restarted once with exit 1. Its log says `first boot: migrating schema, restarting`, which is the container's intended first-boot path. It then created its marker file and has run stably since, so it is healthy and I did not touch it.
+
+All eight pods are Running and ready. Nothing needed a value I lacked, so nothing is left for you to supply.
+
+------------TOTAL METRICS------------
+
+steps 4  in 14579 (uncached 1x)  out 1353  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0022 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/catalog  {"spec":{"template":{"spec":{"containers":[{"name":"catalog","readinessProbe":{"httpGet":{"path":"/","port":80}}}]}}}}
