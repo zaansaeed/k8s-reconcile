@@ -15,9 +15,10 @@ type Config struct {
 }
 
 type ToolCall struct {
-	ID    string
-	Name  string
-	Input json.RawMessage
+	ID     string
+	Name   string
+	Input  json.RawMessage
+	Output string // set by the agent after it runs the call; Send leaves it empty
 }
 
 type Usage struct {

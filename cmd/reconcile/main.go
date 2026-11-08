@@ -141,8 +141,7 @@ func printStep(info agent.StepInfo) {
 
 	for _, call := range info.Calls {
 		fmt.Printf("  model use -> %s %s\n", call.Name, call.Input)
-		output := info.Results[call.ID]
-		fmt.Printf("     %s  (%d bytes)\n", firstLine(output, 120), len(output))
+		fmt.Printf("     %s  (%d bytes)\n", firstLine(call.Output, 120), len(call.Output))
 	}
 
 	fmt.Println()

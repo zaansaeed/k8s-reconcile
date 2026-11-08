@@ -113,12 +113,13 @@ func (client *Client) Send(ctx context.Context, messages []anthropic.MessagePara
 	return reply, nil
 }
 
-// ToolResults wraps one turn's tool output, keyed by tool use ID, as the next
-// user message.
-func ToolResults(results map[string]string) anthropic.MessageParam {
-	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(results))
-	for toolUseID, output := range results {
-		blocks = append(blocks, anthropic.NewToolResultBlock(toolUseID, output, false))
+// ToolResults wraps the outputs of one turn's calls as the next user message, in
+// the order the model made them, so the same calls always produce the same
+// request bytes.
+func ToolResults(calls []ToolCall) anthropic.MessageParam {
+	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(calls))
+	for _, c := range calls {
+		blocks = append(blocks, anthropic.NewToolResultBlock(c.ID, c.Output, false))
 	}
 	return anthropic.NewUserMessage(blocks...)
 }

@@ -29,7 +29,6 @@ type StepInfo struct {
 	N       int
 	Text    string
 	Calls   []llm.ToolCall
-	Results map[string]string
 	Usage   llm.Usage
 	Elapsed time.Duration
 }
@@ -76,32 +75,28 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 			return nil, fmt.Errorf("step %d: conversation outgrew the context window", step)
 		}
 
-		info := StepInfo{
+		for i, call := range reply.Calls { // run each call the model made, in order, and keep its output on the call
+			output, err := agent.tools.Dispatch(ctx, call.Name, call.Input)
+			if err != nil {
+				return nil, fmt.Errorf("step %d: tool %s: %w", step, call.Name, err)
+			}
+			reply.Calls[i].Output = output
+		}
+
+		agent.emit(StepInfo{
 			N:       step,
 			Text:    reply.Text,
 			Calls:   reply.Calls,
 			Usage:   reply.Usage,
 			Elapsed: elapsed,
-		}
+		})
 
 		if len(reply.Calls) == 0 { // no more tool calls. we must be done.
-			agent.emit(info)
 			return &Result{Answer: reply.Text, Steps: step}, nil
 		}
 
-		results := make(map[string]string, len(reply.Calls)) // toolID -> output of tool
-		for _, call := range reply.Calls {                   // we have calls to make
-			output, err := agent.tools.Dispatch(ctx, call.Name, call.Input)
-			if err != nil {
-				return nil, fmt.Errorf("step %d: tool %s: %w", step, call.Name, err)
-			}
-			results[call.ID] = output
-		}
-		info.Results = results
-		agent.emit(info)
-
 		//append the LLMs response as well as our response (tool call results the LLM wanted)
-		messages = append(messages, reply.Message.ToParam(), llm.ToolResults(results))
+		messages = append(messages, reply.Message.ToParam(), llm.ToolResults(reply.Calls))
 	}
 
 	return &Result{Steps: agent.maxSteps, Exhausted: true}, nil
