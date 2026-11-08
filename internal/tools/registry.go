@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
 type Spec struct {
@@ -40,7 +39,7 @@ var registry = []tool{
 	{
 		spec: Spec{
 			Name:        "get_deployments",
-			Description: "List every deployment in the namespace with its rollout conditions and the pod template it asks for: each container's image, command, args, ports, env vars and where their values come from, volume mounts, probes and resource requests. This is the desired state; compare it with what pods and events report. Secret values are never shown.",
+			Description: "List every deployment in the namespace with its rollout conditions and the pod template it asks for: each container's image, command, args, ports, env vars and where their values come from, volume mounts, probes and resource requests. This is the desired state; compare it with what pods and events report. \"env: none\" means the container has no env or envFrom entries at all. Secret values are never shown.",
 			Properties:  map[string]any{},
 		},
 		run: func(t *Toolbox, ctx context.Context, _ json.RawMessage) (string, error) { return t.GetDeployments(ctx) },
@@ -78,7 +77,7 @@ var registry = []tool{
 	{
 		spec: Spec{
 			Name: "apply_patch",
-			Description: "Change a Deployment's pod template with a strategic merge patch. The patch is checked by the API server in a dry run first; if it is rejected, nothing changes and you get the error. On success you get the deployment as it now reads. " +
+			Description: "Change a Deployment's pod template with a strategic merge patch. The patch is checked by the API server in a dry run first; if it is rejected, nothing changes and you get the error. On success you get the deployment as it now reads, and then the rollout result: apply_patch waits up to 90 seconds for the new pods. The result is complete once they have stayed up for a short settling period without restarting, deployed but not stable as soon as a new pod is seen failing (the report says which pod and why), or not finished when the wait ends. It is followed by the current state of every pod in the namespace; a fix can reveal a second fault that the first one was hiding, so read it before deciding you are done. " +
 				"A patch may only change spec.template. Replica counts, selectors, other kinds and Secrets cannot be changed. " +
 				"Lists are merged by a key rather than replaced: containers, env and volumes by name, but volumeMounts by mountPath, so changing a mount's path with a plain patch adds a second mount instead of moving the first.",
 			Properties: map[string]any{
@@ -112,39 +111,6 @@ var registry = []tool{
 				return "error: apply_patch requires an object name\n", nil
 			}
 			return t.ApplyPatch(ctx, args.Kind, args.Name, args.Patch)
-		},
-	},
-	{
-		spec: Spec{
-			Name: "wait_for_rollout",
-			Description: "Wait for a deployment's rollout to finish after a patch, then report the outcome and the current state of every pod in the namespace. " +
-				"Complete means every pod runs the new template, is available, and has stayed up for a short settling period without restarting. A rollout can be deployed but not stable, for example when the new pods keep crashing; the report says which pod and why. If it is not finished when the timeout ends, the report says what it is still waiting for. " +
-				"A fix can reveal a second fault that the first one was hiding, so read the pods in the report before deciding you are done.",
-			Properties: map[string]any{
-				"name": map[string]any{
-					"type":        "string",
-					"description": "Name of the deployment, exactly as get_deployments reported it.",
-				},
-				"timeout_seconds": map[string]any{
-					"type":        "integer",
-					"description": "How long to wait, from 1 to 120 seconds. Defaults to 60.",
-				},
-			},
-			Required: []string{"name"},
-		},
-		write: true,
-		run: func(t *Toolbox, ctx context.Context, input json.RawMessage) (string, error) {
-			args, problem := decodeArgs[struct {
-				Name           string `json:"name"`
-				TimeoutSeconds int    `json:"timeout_seconds"`
-			}]("wait_for_rollout", input)
-			if problem != "" {
-				return problem, nil
-			}
-			if args.Name == "" {
-				return "error: wait_for_rollout requires a deployment name\n", nil
-			}
-			return t.WaitForRollout(ctx, args.Name, time.Duration(args.TimeoutSeconds)*time.Second)
 		},
 	},
 }

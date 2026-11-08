@@ -21,7 +21,7 @@ func New(client kubernetes.Interface, namespace string) *Toolbox {
 	return &Toolbox{client: client, namespace: namespace}
 }
 
-// EnableWrites turns on apply_patch and wait_for_rollout. It is a separate,
+// EnableWrites turns on apply_patch. It is a separate,
 // explicit call so read-only use stays the default.
 func (t *Toolbox) EnableWrites() {
 	t.allowWrites = true

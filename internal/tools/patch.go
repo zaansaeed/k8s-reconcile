@@ -17,9 +17,9 @@ const maxPatchBytes = 8 * 1024
 
 // ApplyPatch checks a patch locally, has the API server validate it in a dry
 // run, then applies it with a strategic merge patch, which merges list items by
-// key so a patch can change one container without restating the others. Every
-// rejection is returned as text, not an error, so the model can read why and
-// try again instead of the run ending.
+// key so a patch can change one container without restating the others, and
+// waits for the rollout. Every rejection is returned as text, not an error, so
+// the model can read why and try again instead of the run ending.
 func (t *Toolbox) ApplyPatch(ctx context.Context, kind string, name string, patch string) (string, error) {
 	if len(patch) > maxPatchBytes {
 		return fmt.Sprintf("patch rejected: %d bytes, the limit is %d\n", len(patch), maxPatchBytes), nil
@@ -41,11 +41,16 @@ func (t *Toolbox) ApplyPatch(ctx context.Context, kind string, name string, patc
 	t.applied = append(t.applied, AppliedPatch{Kind: kind, Name: name, Patch: patch})
 
 	// Show the object as the server now has it, so the model sees what actually
-	// changed, including surprises like a duplicated volume mount.
+	// changed, including surprises like a duplicated volume mount, then wait
+	// for the rollout so the model also sees whether the change worked.
 	var b strings.Builder
 	fmt.Fprintf(&b, "patched deployment/%s. It now reads:\n", name)
 	writeDeployment(&b, *patched)
-	return b.String(), nil
+	report, err := t.waitForRollout(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return b.String() + "\n" + report, nil
 }
 
 // checkPatch enforces the one rule without calling the API, so a disallowed
