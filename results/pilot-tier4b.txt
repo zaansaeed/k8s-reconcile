@@ -1,0 +1,794 @@
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+**Fault 1: `deployment/api`, field `env CACHE_PORT` = `"6380"` (wrong value)**
+
+- **Fix:** set `CACHE_PORT` to `"6379"`, the port the cache serves. The api deployment should roll out a new ReplicaSet with the corrected value.
+- **Evidence:**
+  - get_deployments: `api` sets `CACHE_PORT` to 6380. `cache` declares `port: 6379/TCP` and has no env overrides.
+  - get_logs (api-b587cc64c-6jcxp): every line is `ERROR: cannot reach cache at cache:6380`.
+  - get_pods: the api pod is Running with ready=0/1, and the cache pod is Running with ready=1/1.
+  - get_events: the api readiness probe fails repeatedly (`Readiness probe failed`, repeated). The probe uses the same `CACHE_PORT` variable, so it fails for the same reason.
+
+The api container itself is healthy. It runs a loop that checks the cache, and that check fails only because of the port mismatch. The cache deployment is healthy. I did not query the cache's listening port directly, so the 6379 match rests on the declared container port and the redis:7.4 default.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2632 (uncached 1x)  out 692  cache_write 1456 (1.25x)  cache_read 2912 (0.1x)
+cost $0.0008 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+The namespace is healthy, with one caveat about a leftover pod.
+
+**Fault 1: `Deployment/api` had the wrong cache port**
+- **What was wrong:** The api container set `CACHE_PORT=6380`, but the cache container serves on 6379 (its declared port, and the redis default). The api's readiness probe checks `nc -z cache 6380`, which always failed, so the pod never became ready and the deployment never became available. The api logs showed `ERROR: cannot reach cache at cache:6380` on every attempt.
+- **Patch applied:**
+  ```json
+  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+  ```
+- **Rollout result:** Complete. The new pod `api-6bdd974567-npwf6` is 1/1 ready, with no restarts, and stayed up for 10s. The api logs and probe now target `cache:6379`.
+
+**Remaining item (not a fault I could act on):** The old pod `api-b587cc64c-t7jjp` is still listed as Running with 0/1 ready. It belongs to the superseded ReplicaSet, so it should terminate on its own. I can only change pod templates, not delete pods, so I left it. If it persists, the cause is in the old ReplicaSet and needs a cluster operator to clear it.
+
+`Deployment/cache` was healthy (1/1 ready, redis:7.4) and I did not touch it.
+
+The namespace is healthy: the api and cache deployments are both available.
+
+------------TOTAL METRICS------------
+
+steps 5  in 8033 (uncached 1x)  out 1245  cache_write 2039 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0018 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+**deployment/api is pointing at the wrong cache port**
+
+- **Field:** `spec.template.spec.containers[api].env CACHE_PORT` is set to `"6380"`.
+- **Fix:** change `CACHE_PORT` to `"6379"`, the port the cache container listens on. The readiness probe reads the same variable, so this one change fixes both the app's check loop and the probe.
+- **Evidence:**
+  - get_deployments: the cache container (redis:7.4) declares port `6379/TCP`, but the api sets `CACHE_PORT` to `6380`. The api's readiness probe runs `nc -z cache $CACHE_PORT`.
+  - get_pods: `api-b587cc64c-6ls2j` is Running but `ready=0/1`, with no restarts. The cache pod is `1/1`, so the cache itself is healthy.
+  - get_logs (api pod): the same line repeats: `ERROR: cannot reach cache at cache:6380`.
+
+I couldn't see the `cache` Service, because there's no tool for Services. If that Service maps port 6380 to 6379, the cause would lie elsewhere. But since port 6380 can't be reached and the cache container only exposes 6379, the env var is the most likely fault.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1908 (uncached 1x)  out 568  cache_write 1456 (1.25x)  cache_read 2912 (0.05x)
+cost $0.0269 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+I found one fault and fixed it.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** The api container's `CACHE_PORT` env var was set to `"6380"`, but the cache (Redis) listens on port 6379. The cache deployment's container port is 6379, and its log says `Running mode=standalone, port=6379`. Because of the wrong port, the api logged `ERROR: cannot reach cache at cache:6380` over and over. Its readiness probe checks the same host and port, so the pod stayed at 0/1 ready. The probe itself was fine; the setting it was reading was wrong.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template and 1 is available. The new pod `api-6bdd974567-9sdsl` is 1/1 ready and stayed up for 10s without restarting.
+
+I can't see the `cache` Service, so I couldn't check its port mapping directly. The new pod passing its readiness probe on `cache:6379` shows that port works.
+
+**Deployment/cache** was healthy (1/1 ready), so I left it alone.
+
+**Namespace status:** Healthy. Both deployments have a ready pod on their current template. The last pod listing still showed the old api pod (`api-b587cc64c-l52br`, 0/1 ready), but the rollout reported 0 old-template pods still running, so it was most likely just shutting down.
+
+------------TOTAL METRICS------------
+
+steps 4  in 4507 (uncached 1x)  out 975  cache_write 2039 (1.25x)  cache_read 6117 (0.05x)
+cost $0.0489 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+**Root cause: the `db` deployment binds Redis to loopback only, so nothing else in the cluster can reach it. The api and web failures follow from that.**
+
+1. **Faulty object:** `deployment/db`
+   - **Field:** `spec.template.spec.containers[db].args` is `["--bind" "127.0.0.1"]`.
+   - **Fix:** remove the `--bind 127.0.0.1` args, or change them to `--bind 0.0.0.0` so Redis listens on the pod IP. The default Redis 7 bind (`* -::*`) is sufficient.
+   - **Evidence:** get_deployments shows the args. get_pods shows db is Running, 1/1, with no restarts, and get_logs shows Redis reporting "Ready to accept connections tcp" on port 6379. Redis is healthy in-container but is not reachable from other pods. The bind address is inferred from the args, not printed in the logs.
+
+2. **Symptom:** `deployment/api` (pod `api-7fdd7df845-zssm5`), 0/1 ready.
+   - The readiness probe `nc -z -w 2 db 6379` fails, and the container logs repeat "ERROR: cannot reach db at db:6379".
+   - Evidence: get_deployments (probe definition), get_logs (api), get_events (repeated readiness probe failures on the api pod).
+   - This should clear once db accepts connections on its pod IP.
+
+3. **Downstream symptom:** `deployment/web` (pod `web-6b6bcf754-sr8qr`), 0/1 ready.
+   - Its probe `wget http://api:8080/` gets "Connection refused", because api never becomes ready and so has no working endpoint behind the `api` service.
+   - Evidence: get_events (readiness failures on the web pod, with "Connection refused" to 10.96.98.7), get_deployments (web's `API_URL`).
+   - This should clear once api becomes ready. No separate fault was found in web.
+
+------------TOTAL METRICS------------
+
+steps 3  in 4268 (uncached 1x)  out 1277  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0011 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+The namespace is healthy: all three pods are 1/1 ready.
+
+**Fault: `deployment/db` bound Redis to localhost only**
+- **What was wrong:** The db container was started with `args: ["--bind", "127.0.0.1"]`. Redis accepted connections only from inside its own container, so the `api` pod could not reach `db:6379`. The api logs repeated `ERROR: cannot reach db at db:6379`. The `web` pod failed for the same reason, because its `api` dependency was never ready. The db pod showed Running and 1/1 only because it has no readiness probe, so the fault did not show in its status.
+- **Patch applied:** Changed the container args to `["--bind", "0.0.0.0"]`.
+- **Rollout result:** Complete. The new db pod stayed up for 10 seconds without restarting. The pods after the patch were `api-7fdd7df845-cmvsf` 1/1 Running, `db-58444d9db-dkrbp` 1/1 Running, and `web-6b6bcf754-2mrxq` 1/1 Running.
+
+**Fault: `deployment/api` and `deployment/web`**
+- No change was made to these. Their failures were a consequence of the db fault. Their probes and environment values were correct: `DB_HOST=db`, `DB_PORT=6379`, `API_URL=http://api:8080/`. Both became ready once db was reachable.
+
+I did not verify the api log output after the fix. The 1/1 readiness reported by the pods is the evidence that the api can reach db.
+
+------------TOTAL METRICS------------
+
+steps 4  in 9753 (uncached 1x)  out 1689  cache_write 0 (1.25x)  cache_read 8156 (0.1x)
+cost $0.0019 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/db  {"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+There is one root fault. The `db` pod shows as Ready, but Redis only listens on localhost, so the other two deployments fail because of it.
+
+**Fault: deployment/db**
+- **Field:** `spec.template.spec.containers[db].args` is currently `["--bind" "127.0.0.1"]`.
+- **Problem:** Redis accepts connections only on the pod's loopback address, so other pods can't connect to `db:6379`.
+- **Fix:** Make Redis listen on all interfaces. Change the args to `["--bind" "0.0.0.0"]`, or remove them. If you rely on the image's default config, Redis's protected mode may also block outside clients that have no password set. In that case, also add `--protected-mode no` or configure a password.
+- **Evidence:**
+  - get_deployments: the db container's args are `--bind 127.0.0.1`, and api connects to `DB_HOST=db` and `DB_PORT=6379`.
+  - get_logs on db-5979d669-jq5ws: Redis started normally ("Ready to accept connections tcp", port 6379), so the process itself is healthy.
+  - get_logs on api-7fdd7df845-kb26m: the log repeats "ERROR: cannot reach db at db:6379".
+  - get_pods: db is 1/1 ready, but api and web are both 0/1 ready, with no restarts.
+
+**How the failure spreads (these deployments are not faulty themselves)**
+- **deployment/api:** Its readiness probe runs `nc -z $DB_HOST $DB_PORT`, which fails because Redis isn't reachable, so the api pod stays not ready.
+- **deployment/web:** Its readiness probe and main loop request `http://api:8080/`. The api pod isn't ready, so that address almost certainly has no endpoints and the requests fail. I didn't check the `api` Service or its endpoints directly.
+- **Expected result:** Once db listens on a reachable address, api should become ready, and web should follow.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3156 (uncached 1x)  out 891  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0313 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+I found one fault. Fixing it brought all three deployments back to ready.
+
+**Fault: Deployment/db**
+- **What was wrong:** The Redis container was started with `--bind 127.0.0.1`, so it only accepted connections from inside its own pod. The db pod still showed as ready because it has no readiness probe. Other pods couldn't connect: the api logs showed `ERROR: cannot reach db at db:6379` over and over, and api's readiness probe (`nc -z db 6379`) kept failing. web checks `http://api:8080/` in its probe, so it failed too. api and web were only showing the symptom, so I didn't change them.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}`
+- **Rollout result:** "rollout of deployment/db complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s."
+- **Afterwards:** api-7fdd7df845-fk944 is 1/1 ready, db-58444d9db-xpff6 is 1/1 ready, and web-6b6bcf754-g9c7w is 1/1 ready, all with no restarts.
+
+**Note:** Redis now listens on all interfaces and no password is set. api's probe only checks that the TCP port opens, so I didn't check whether Redis's protected mode would refuse real commands from other pods.
+
+**Namespace status:** Healthy. All three deployments (api, db, web) are available and their pods are ready.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5650 (uncached 1x)  out 1106  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0464 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/db  {"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+**Fault 1: `deployment/api`, container `api`, env `DB_HOST`**
+
+- **Current value:** `DB_HOST = "postgres"`
+- **Fix:** Set `DB_HOST` to the name that resolves to the db workload. The evidence doesn't confirm that name. I did not list Services, so I can't say whether it is `db`. Confirm the Service name for `deployment/db` and use that.
+- **Evidence:**
+  - get_pods: `api-5564954b58-h5h4m` is Running with ready=0/1 and no restarts.
+  - get_deployments: `api` has Available=False (MinimumReplicasUnavailable). Its readiness probe runs `nc -z -w 2 "$DB_HOST" "$DB_PORT"`, with `DB_HOST=postgres`.
+  - get_logs: every line reads `nc: bad address 'postgres'` followed by `ERROR: cannot reach db at postgres:6379`.
+  - get_events: repeated `Unhealthy` readiness-probe failures with `nc: bad address 'postgres'`.
+
+**Secondary issue, not the cause:** `DB_PORT` is `6379`, which is the Redis port that `deployment/db` (image `redis:7.4`) serves. That matches the db workload, so it is not wrong. The problem is only the hostname. The db pod is healthy (ready=1/1, no restarts), and nothing in the namespace shows a fault there.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2667 (uncached 1x)  out 896  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0008 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+**Fault: `deployment/api` had the wrong database host.**
+
+- **What was wrong:** The api container had `DB_HOST=postgres`, but nothing named `postgres` exists in this namespace. The logs showed `nc: bad address 'postgres'` on every check, so the readiness probe failed and the deployment never became available. The only database here is the `db` deployment, which runs redis on 6379. `DB_PORT=6379` was already correct.
+- **Patch applied:** Changed `DB_HOST` from `postgres` to `db` on the `api` container. `DB_PORT` stayed at `6379`.
+- **Rollout result:** apply_patch reported the rollout complete. The new pod `api-7d75889d9-t7wvc` is 1/1 ready with no restarts. The deployment's Available condition is still stale in the output I read.
+- **Leftover:** The old-template pod `api-5564954b58-5w7gr` is still listed as Running, 0/1 ready. I have no tool to delete pods, so it needs to be removed by the ReplicaSet's normal cleanup or manually.
+
+**Namespace status:** The workload is working. `db` was healthy and untouched. `api` has a ready pod on the new template. The one remaining issue is the old api pod, which is not serving traffic and should go away on its own or be deleted by an operator with pod access.
+
+------------TOTAL METRICS------------
+
+steps 5  in 8880 (uncached 1x)  out 1261  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0016 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"},{"name":"DB_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Wrong field:** `env DB_HOST`, currently `"postgres"`. That hostname doesn't resolve in the namespace.
+- **Fix:** Set `DB_HOST` to the Service name in front of deployment/db. That is probably `db`, but I couldn't check, because my tools can't list Services. `DB_PORT=6379` matches the port db exposes (6379/TCP), so leave it as is.
+- **Evidence:**
+  - get_logs (api-5564954b58-v994p) repeats `nc: bad address 'postgres'` and `ERROR: cannot reach db at postgres:6379`.
+  - get_events shows the repeated `Readiness probe failed: nc: bad address 'postgres'`. That failure is why the pod sits at Running with ready=0/1 and no restarts.
+  - get_deployments shows the database is deployment/db running `redis:7.4` on 6379/TCP. Nothing named "postgres" appears in the pod or deployment lists.
+  - db-6b45d96854-vkz47 is healthy at 1/1, so the problem is the address api uses, not the database.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2576 (uncached 1x)  out 595  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0231 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+I found one fault and fixed it.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** The `DB_HOST` env var was set to `"postgres"`, and that hostname doesn't exist in this namespace. The pod logs and the readiness probe events both showed `nc: bad address 'postgres'`, so the api pod never became ready. The only database here is `deployment/db`, a redis container on port 6379. That matches the `DB_PORT` value of 6379, which was already correct. I couldn't list Services with my tools, so `db` was my best guess at the right hostname. The successful rollout shows that `db` resolves and accepts connections on 6379.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template and 1 is available. The new pod `api-7d75889d9-hv4jb` is ready (1/1) and stayed up for 10s without restarting. When the rollout finished, the old pod `api-5564954b58-6xwr6` (0/1) was still listed. The report also counts 0 old-template pods still running, so it was most likely shutting down.
+
+`deployment/db` was healthy the whole time, so I didn't change it.
+
+**Namespace status:** Healthy. `api` and `db` both have 1/1 ready pods.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5153 (uncached 1x)  out 993  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0421 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+**Fault: `deployment/api` has the wrong cache port.**
+
+- **Field:** `container api` → `env CACHE_PORT` = `"6380"`
+- **Fix:** Set `CACHE_PORT` to `"6379"`, the port the cache container listens on, so it matches `deployment/cache` (`port: 6379/TCP`). The api deployment will then roll out a new pod.
+- **Evidence:**
+  - get_deployments: `api` sets `CACHE_PORT` to `"6380"`. `cache` exposes `6379/TCP`.
+  - get_logs on `api-b587cc64c-4f44q`: repeated `ERROR: cannot reach cache at cache:6380`.
+  - get_deployments: the api readiness probe runs `nc -z` against the same `$CACHE_HOST:$CACHE_PORT`, so it fails and the pod stays 0/1.
+  - get_events: repeated `Readiness probe failed` on the api pod. Nothing else is wrong: both images were pulled and both containers started.
+
+The cache pod is healthy (1/1, no restarts). The api container itself runs fine; its only problem is the wrong port.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2642 (uncached 1x)  out 626  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0006 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+The namespace is healthy, with one leftover: the old api pod from the previous ReplicaSet is still running and not ready. I can't delete pods, so I left it for the ReplicaSet controller to clean up.
+
+**Fault 1: `deployment/api` had the wrong cache port**
+- **What was wrong:** The api container set `CACHE_PORT` to `6380`. The cache is Redis 7.4, and its logs show it listening on port `6379`. The api therefore could not reach the cache: its logs repeated `ERROR: cannot reach cache at cache:6380`, and its readiness probe failed, so the pod stayed at 0/1 and the deployment stayed unavailable.
+- **Patch applied:** Changed the `CACHE_PORT` env value of container `api` from `6380` to `6379`.
+- **Rollout result:** apply_patch reported the rollout complete: 1 of 1 new pods running the new template, 1 available, stable for 10s without restarts. The new pod `api-6bdd974567-84pfk` is 1/1 Ready, and its logs show `cache ok`.
+
+**Leftover, not repaired:** The old pod `api-b587cc64c-vrfr4` from the previous ReplicaSet is still listed as Running with 0/1 ready. It should be removed when its ReplicaSet scales down. I have no tool to delete pods, so this needs a manual check if it persists.
+
+**Final state:** `cache/cache` was never broken and I did not touch it. `api` now has a ready replica, so the namespace is healthy apart from the old pod noted above.
+
+------------TOTAL METRICS------------
+
+steps 5  in 9293 (uncached 1x)  out 1276  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0017 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Wrong field:** env `CACHE_PORT` is set to `"6380"`.
+- **Fix:** set `CACHE_PORT` to `"6379"`, the port the cache container listens on.
+- **Evidence:**
+  - get_deployments: deployment/cache runs `redis:7.4` and exposes port `6379/TCP`. The api readiness probe runs `nc -z cache $CACHE_PORT`, so it checks port 6380. deployment/api reports `ready=0`, `Available=False`.
+  - get_pods: `api-b587cc64c-kt4hh` is Running with `ready=0/1` and no restarts. The cache pod is `1/1` ready, so the cache itself is healthy.
+  - get_logs on `api-b587cc64c-kt4hh`: the log repeats `ERROR: cannot reach cache at cache:6380`.
+
+**Caveat:** my tools can't read Services, so I couldn't see the port on the `cache` Service. The fix assumes that Service maps 6379 to the container's 6379. If it actually exposes a different port, set `CACHE_PORT` to that port instead.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1910 (uncached 1x)  out 556  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0196 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+I found one fault and fixed it.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** The api container was set to `CACHE_PORT=6380`, but the cache deployment's redis container listens on port 6379/TCP. The api logs kept saying `ERROR: cannot reach cache at cache:6380`. Its readiness probe checks the same host and port, so the probe failed too and the pod stayed at 0/1 ready. The probe itself was fine; the port setting was wrong.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}`
+- **Rollout result:** "complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s." The new pod `api-6bdd974567-96t2t` is Running and 1/1 ready.
+
+**Deployment/cache** was healthy, so I didn't change it.
+
+**Namespace status:** Healthy. Both deployments have their pods ready. The pod list taken right after the rollout still showed the old pod `api-b587cc64c-4l84z` at 0/1. The rollout reported no old-template pods still running, so it was most likely shutting down, but I didn't check the pod list again to confirm it was gone.
+
+------------TOTAL METRICS------------
+
+steps 4  in 3606 (uncached 1x)  out 818  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0324 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+**Root cause: `deployment/db`, which binds Redis to loopback only, so the `api` pod can never reach it.**
+
+1. **Faulty object: `deployment/db`**
+   - Field: `spec.template.spec.containers[db].args` = `["--bind", "127.0.0.1"]`
+   - Fix: remove the `--bind 127.0.0.1` args, or change them to `--bind 0.0.0.0` so Redis listens on the pod IP. Redis's default bind already listens on all interfaces, so removing the args is the simplest fix.
+   - Evidence: get_deployments shows the args. get_logs on db shows Redis "Ready to accept connections" on port 6379 with no errors, so the process is healthy but only reachable on loopback. get_logs on api repeatedly prints `ERROR: cannot reach db at db:6379`, which is the `nc -z` check failing from another pod.
+
+2. **Faulty object: `deployment/api`** (symptom, not a separate defect)
+   - Its readiness probe is `nc -z -w 2 $DB_HOST $DB_PORT`, which fails because db is unreachable. The pod stays at ready=0/1.
+   - Evidence: get_pods shows api ready=0/1 with no restarts. get_events shows repeated `Readiness probe failed` for api-7fdd7df845-69rrw. get_deployments shows Available=False.
+
+3. **Faulty object: `deployment/web`** (downstream symptom)
+   - Its readiness probe and script depend on `http://api:8080/`. Because api is not ready, the `api` Service has no ready endpoints, so connections are refused.
+   - Evidence: get_events shows `Readiness probe failed: wget: can't connect to remote host (10.96.193.114): Connection refused` for web-6b6bcf754-dbcp6. get_logs on web shows `ERROR: api unavailable at http://api:8080/`. get_deployments shows Available=False.
+
+Fixing db's bind address should make api's probe pass, which should then make web's pass.
+
+------------TOTAL METRICS------------
+
+steps 3  in 4479 (uncached 1x)  out 1577  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0013 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+The namespace is healthy: api, db and web are all 1/1 ready with no restarts. The api log now shows "db ok", after earlier "cannot reach db" lines from before the fix.
+
+**Fault: Deployment/db**
+- **What was wrong:** The Redis container was started with `--bind 127.0.0.1`, so it listened only on loopback. The api pod's readiness probe and its health loop (`nc -z db 6379`) could not reach it, so api never became ready. Web depends on api and was failing with "connection refused" against the api service, which had no ready endpoints.
+- **Patch applied:** Changed the container args from `["--bind","127.0.0.1"]` to `["--bind","0.0.0.0"]`. I set the bind explicitly to all interfaces rather than removing the flag, because an unset bind would leave Redis's protected mode active and it would reject clients from other pods.
+- **Rollout result:** Complete. The new pod (db-58444d9db-mmqhk) stayed up for 10s without restarting and is available.
+
+**Downstream recovery (no patch needed):**
+- Deployment/api became ready once it could reach db. Its readiness probe is unchanged.
+- Deployment/web became ready once the api service had endpoints. Its probe is unchanged.
+
+I made one patch in total, and I did not touch the api or web deployments.
+
+------------TOTAL METRICS------------
+
+steps 5  in 15041 (uncached 1x)  out 2107  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0027 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/db  {"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+There is one root fault. It breaks api, and that in turn breaks web.
+
+**Fault: deployment/db**
+- **Field:** `spec.template.spec.containers[db].args` is set to `["--bind" "127.0.0.1"]`. Redis only listens on the pod's loopback interface, so nothing outside the db pod can reach it, including traffic sent to `db:6379`.
+- **Fix:** Remove the `--bind 127.0.0.1` args, or change them to `["--bind" "0.0.0.0"]`. Because this exposes Redis on all interfaces, you may also need to add `--protected-mode no` or set a password; Redis protected mode can refuse remote connections when no password is set.
+- **Evidence:**
+  - get_deployments shows that db args. db itself looks healthy: it's ready 1/1, and its logs say "Ready to accept connections tcp" on port 6379.
+  - get_logs for api-7fdd7df845-d75zh repeats `ERROR: cannot reach db at db:6379`. The api readiness probe runs the same `nc -z db 6379` check, so api stays at 0/1 (get_pods).
+  - web-6b6bcf754-2p4sg is 0/1 because its readiness probe fetches `http://api:8080/`. The likely reason it fails is that an unready api pod isn't sent any traffic. web's own config looks correct, so it should recover once api is ready. I didn't read web's logs or the events to confirm this.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3153 (uncached 1x)  out 710  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0277 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+I found one fault, and fixing it brought all three workloads back to healthy.
+
+**Fault: Deployment/db**
+- **What was wrong:** Redis was started with `args: ["--bind","127.0.0.1"]`, so it only accepted connections from inside its own pod. db itself showed as ready, but other pods couldn't reach it on `db:6379`. That caused two knock-on failures:
+  - The api pod's logs kept repeating `ERROR: cannot reach db at db:6379`, and its readiness check (`nc -z db 6379`) failed, so it stayed at 0/1 ready.
+  - web's readiness check fetches `http://api:8080/`, so web also stayed at 0/1 ready while api was down.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}`
+- **Rollout result:** complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and it stayed up without restarting for 10s.
+
+**Deployment/api and Deployment/web:** I didn't change either. Their settings were correct, and both became ready (1/1) once db was reachable.
+
+**Namespace status:** healthy. api, db and web are each Running, 1/1 ready, with no restarts.
+
+One thing to know: the new setting lets Redis accept connections from any pod that can reach it on the network, and it has no password set. The current health checks only test whether the port answers. If real clients send commands and Redis refuses them because it's running unprotected, you'll need to set a password or turn off Redis's protected mode.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5760 (uncached 1x)  out 1227  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0492 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/db  {"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+**Fault 1: Deployment `api`, container `api`, env `DB_HOST`**
+
+- **Current value:** `DB_HOST = "postgres"`
+- **Fix:** Point `DB_HOST` at the name that resolves to the db workload. The db pod is `redis:7.4` on port 6379, and the deployment is named `db`, so the likely value is `db`. I could not list Services, so confirm the Service name before changing it.
+- **Evidence:**
+  - get_logs (api pod): `nc: bad address 'postgres'` and `ERROR: cannot reach db at postgres:6379`, repeated on every loop. The hostname does not resolve.
+  - get_events: readiness probe failures, `nc: bad address 'postgres'` (repeated).
+  - get_deployments: `api` has `DB_HOST=postgres`, and its readiness probe uses the same host. This keeps the pod at 0/1 ready, so `Available=False` with `MinimumReplicasUnavailable`.
+  - get_pods: `api-5564954b58-r7x4s` is Running, ready 0/1, no restarts. The process is healthy; it only reports the unreachable host.
+
+**Not a fault:** Deployment `db` (`redis:7.4`, port 6379) is Available and ready 1/1. Its port matches the api's `DB_PORT=6379`, so only the host name is wrong.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2657 (uncached 1x)  out 834  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0007 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+The namespace is healthy, with one leftover pod from the old template.
+
+**Fault 1: `deployment/api` pointed at a database host that does not exist**
+- **What was wrong:** The `DB_HOST` env var was `postgres`, which does not resolve in this namespace. The readiness probe and the app loop both failed with `nc: bad address 'postgres'`, so the pod stayed at 0/1 and the deployment never became available. The only database in the namespace is `deployment/db`, which runs redis on port 6379. `DB_PORT=6379` was already correct.
+- **Patch applied:** Set `DB_HOST` to `db` on the `api` container. I did not change the port or the probe.
+- **Rollout result:** Complete. The new pod `api-7d75889d9-49877` is 1/1 Ready with no restarts, and the rollout stayed up for the settling period.
+
+**Caveat on the hostname:** I did not list Services, so `db` is inferred from the deployment name rather than read from a Service object. The successful readiness probe is the evidence that it resolves.
+
+**Leftover pod:** `api-5564954b58-s6rlx` (old template) still shows Running with 0/1 Ready. It should be removed as the old ReplicaSet scales down. I cannot delete pods or change replica counts, so I left it. It is not serving traffic, but it is worth checking that it goes away.
+
+**Other workloads:** `deployment/db` (redis:7.4) is 1/1 Ready and was not touched.
+
+The namespace is healthy apart from that old api pod, which is expected to terminate on its own.
+
+------------TOTAL METRICS------------
+
+steps 5  in 9362 (uncached 1x)  out 1603  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0018 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Wrong field:** env `DB_HOST` is set to `"postgres"`. That hostname does not resolve. The only database workload in the namespace is deployment/db, which runs `redis:7.4` on port 6379.
+- **Fix:** Set `DB_HOST` to the name of the Service in front of the db pods, which is most likely `db`. I can't list Services with these tools, so check the actual Service name before changing it. `DB_PORT` is `"6379"`, which matches db's container port, so leave it as is.
+- **Evidence:**
+  - get_logs (api-5564954b58-pbtqd) repeats `nc: bad address 'postgres'` and `ERROR: cannot reach db at postgres:6379`.
+  - get_pods shows api at ready=0/1 with no restarts. The readiness probe runs the same `nc -z "$DB_HOST" "$DB_PORT"` check, so it keeps failing.
+  - get_deployments shows api Available=False, while db is Available=True and ready 1/1.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1920 (uncached 1x)  out 524  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0190 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+I found one fault, in deployment/api, and fixed it.
+
+**Fault 1: Deployment/api**
+- **What was wrong:** `DB_HOST` was set to `"postgres"`, and that name doesn't exist in the cluster's DNS. The pod logs and the readiness probe events both showed `nc: bad address 'postgres'`, so the api pod never became ready (0/1). The database in this namespace is deployment/db, a `redis:7.4` container on port 6379, which already matched `DB_PORT=6379`.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}`
+  - I can't list Services, so I couldn't read the correct hostname directly. I guessed `db` from the database deployment's name and relied on the rollout to test it. The new pod passed its readiness probe, which runs `nc -z` against `db:6379`, so the name resolves and the port accepts connections.
+- **Rollout result:** "rollout of deployment/api complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s." The new pod api-7d75889d9-gts2h is Running and 1/1 ready.
+
+deployment/db was healthy, so I didn't change it.
+
+**Namespace status:** Both workloads are now healthy. The pod list taken right after the rollout still showed the old pod api-5564954b58-4xcwn (0/1), even though the rollout reported no old-template pods still running. It's most likely in the middle of shutting down, but I didn't check again to confirm it's gone.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5121 (uncached 1x)  out 1037  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0429 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+**Fault: api deployment has the wrong cache port.**
+
+- **Object:** `deployment/api` (ReplicaSet `api-b587cc64c`, pod `api-b587cc64c-5n6q5`)
+- **Field:** `env CACHE_PORT` is `"6380"`. The cache service serves on `6379`, so this should be `"6379"`. Changing the env value to `6379` fixes it. The readiness probe reads the same env var, so it needs no separate change.
+- **Evidence:**
+  - get_deployments: `CACHE_PORT` value `"6380"`. The `cache` container exposes `port: 6379/TCP`. The api readiness probe is `nc -z -w 2 "$CACHE_HOST" "$CACHE_PORT"`, which fails for the same reason.
+  - get_pods: `api-b587cc64c-5n6q5` is Running with ready=0/1. `cache-84588965b8-svb4c` is 1/1.
+  - get_logs: the api container logs `ERROR: cannot reach cache at cache:6380` on every iteration.
+  - get_events: repeated `Unhealthy` readiness probe failures on the api pod. Its image pulled and started normally, so the fault is not in the image.
+  - get_deployments: `api` shows Available=False (MinimumReplicasUnavailable), with replicas desired=1, ready=0.
+
+The cache deployment is healthy and needs no change.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2618 (uncached 1x)  out 689  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0006 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+The namespace is healthy, with one fault fixed. The old api pod `api-b587cc64c-7xm7c` is still listed as Running and not ready. It belongs to the superseded ReplicaSet, and I have no tool to delete pods, so I cannot confirm it has gone. It should drain once the old ReplicaSet scales down.
+
+**Fault 1: Deployment/api — wrong cache port**
+- **What was wrong:** The api container's env set `CACHE_PORT=6380`. The cache deployment runs redis:7.4 on its default port 6379, and declares 6379/TCP. The api's logs showed `ERROR: cannot reach cache at cache:6380` on every check. Its readiness probe, which runs the same `nc` check, failed, so the pod stayed at 0/1 and the deployment never became available.
+- **Patch applied:** Changed the env `CACHE_PORT` on container `api` from `"6380"` to `"6379"`. The patch was a strategic merge on the env entry, and no probe was touched.
+- **Rollout result:** Complete. The new pod `api-6bdd974567-879jz` is 1/1 ready with no restarts, and it stayed up for the settling period.
+
+**Deployment/cache:** Healthy (1/1 ready, Available). No change needed.
+
+**Namespace state:** Healthy. Both deployments are available. The only remaining oddity is the old api pod noted above.
+
+------------TOTAL METRICS------------
+
+steps 5  in 8144 (uncached 1x)  out 1220  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0015 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Wrong field:** env `CACHE_PORT`, currently set to `"6380"`.
+- **Fix:** Change `CACHE_PORT` to `"6379"`, the port the cache container listens on.
+- **Evidence:**
+  - get_deployments: deployment/cache's redis:7.4 container exposes port `6379/TCP`. The api readiness probe runs `nc -z "$CACHE_HOST" "$CACHE_PORT"`, so it checks port 6380, where nothing is listening.
+  - get_pods: pod api-b587cc64c-6s6g6 is Running but shows `ready=0/1`, while the cache pod is `1/1`.
+  - get_logs on api-b587cc64c-6s6g6: the log repeats `ERROR: cannot reach cache at cache:6380`.
+
+One thing I didn't check: there's no tool here for Services, so I couldn't see the `cache` Service's port mapping. The fix assumes that Service passes port 6379 through to the container unchanged.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1924 (uncached 1x)  out 532  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0192 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-client-port 
+recreated k8s-reconcile-client-port, waiting 15s for it to settle
+
+I found one fault and fixed it.
+
+**Fault 1**
+- **Object:** Deployment/api
+- **What was wrong:** The api container was set to reach the cache on port 6380 (`CACHE_PORT=6380`). The cache deployment runs `redis:7.4` and exposes port 6379/TCP. The api logs kept repeating `ERROR: cannot reach cache at cache:6380`. Its readiness probe runs the same `nc -z cache $CACHE_PORT` check, so it kept failing and the pod sat at 0/1 ready. The probe itself was fine; it was failing because the port value was wrong.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}`
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and it stayed up without restarting for 10s. The new pod `api-6bdd974567-x64pq` is Running and 1/1 ready, and its logs show `cache ok`.
+- **Caveat:** I can't see Service objects, so I chose 6379 from the cache container's declared port. The successful connection afterwards confirms that `cache:6379` is reachable.
+
+The `cache` deployment was healthy and I didn't touch it.
+
+**Namespace status:** Healthy. Both deployments are available. In the pod list taken just after the rollout, the old pod `api-b587cc64c-wrjl7` was still shown at 0/1 ready, even though the rollout reported no old-template pods still running. That looks like it was still shutting down, but I didn't check again to confirm it's gone.
+
+------------TOTAL METRICS------------
+
+steps 5  in 7624 (uncached 1x)  out 1060  cache_write 0 (1.25x)  cache_read 10195 (0.05x)
+cost $0.0537 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"CACHE_PORT","value":"6379"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+**Root cause: `deployment/db` binds Redis to loopback only, so nothing else in the namespace can reach it.**
+
+1. **Faulty object:** `deployment/db`
+   - **Field:** `spec.template.spec.containers[db].args` = `["--bind" "127.0.0.1"]`
+   - **Fix:** Change the bind address so Redis listens on the pod interface, for example `args: ["--bind", "0.0.0.0"]`, or remove the `--bind` override. Then roll the deployment.
+   - **Evidence:**
+     - get_deployments: `db` has `args ["--bind" "127.0.0.1"]`, and `db` itself is Available and ready.
+     - get_logs on `db-5979d669-gghfv`: Redis reports "Ready to accept connections" on port 6379, so the process is up but is not reachable from other pods.
+     - get_logs on `api-7fdd7df845-qztrw`: the loop repeats `ERROR: cannot reach db at db:6379`.
+
+2. **Faulty object:** `deployment/api` (symptom, not a separate defect)
+   - **Field:** The readiness probe `nc -z -w 2 "$DB_HOST" "$DB_PORT"` fails, so the pod stays 0/1 ready. The api container itself is fine: it starts `httpd` on 8080 and its command is valid.
+   - **Fix:** Resolved by fix 1. No change to api is needed.
+   - **Evidence:** get_pods shows `api-7fdd7df845-qztrw` Running with ready=0/1. get_events shows repeated `Readiness probe failed` for the api pod.
+
+3. **Faulty object:** `deployment/web` (symptom, not a separate defect)
+   - **Field:** The readiness probe `wget ... "$API_URL"` with `API_URL=http://api:8080/` fails because the api Service has no ready endpoints.
+   - **Fix:** Resolved once api becomes ready. No change to web is needed.
+   - **Evidence:** get_events shows repeated `Readiness probe failed: wget: can't connect to remote host (10.96.183.254): Connection refused` for the web pod. get_pods shows `web-6b6bcf754-xhl7x` at 0/1.
+
+The api and web restart counts are both "none", so they are not crash-looping. They are unready because of the db bind problem.
+
+------------TOTAL METRICS------------
+
+steps 3  in 4258 (uncached 1x)  out 1471  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0012 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+The namespace is healthy: all three pods are 1/1 ready, and the `api` logs now show `db ok`. The earlier `ERROR` lines are from before the fix.
+
+**Fault: `deployment/db`**
+- **What was wrong:** The Redis container was started with `--bind 127.0.0.1`, so it only accepted connections on loopback. The `api` pod could not reach `db:6379` over the pod network. `api` failed its readiness probe, and `web` could not reach `api` either. The db pod itself was running and ready, so the failure was silent until the dependents were checked.
+- **Patch applied:** Changed the container args to `["--bind","0.0.0.0"]`.
+- **Rollout result:** Complete. The new pod `db-58444d9db-fjcg4` stayed up without restarting for 10s, and 1 of 1 pods are available.
+
+**Knock-on effects (no separate fix needed):**
+- `deployment/api` was not ready because its readiness probe checks db reachability. The probe itself was correct, so I left it alone. Its pod `api-7fdd7df845-rj8r2` is now 1/1 ready.
+- `deployment/web` was not ready because `api` had no ready endpoints. Its pod `web-6b6bcf754-dxz9x` is now 1/1 ready.
+
+I did not patch `api` or `web` directly, because their templates were correct once db was reachable.
+
+------------TOTAL METRICS------------
+
+steps 5  in 14618 (uncached 1x)  out 2022  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0026 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/db  {"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+There is one fault. It breaks two workloads in a chain: db → api → web.
+
+**Fault: deployment/db**
+- **Field:** container `db` args. Current value: `["--bind" "127.0.0.1"]`. Redis only listens on the pod's loopback address, so no other pod can connect to it on port 6379. The db pod still shows 1/1 ready, so it looks healthy.
+- **Fix:** Make Redis listen on all interfaces. Change the args to `["--bind" "0.0.0.0"]`, or remove the `--bind` arg. Once api can reach the db, Redis protected mode may also need to be off (`--protected-mode no`). I haven't checked this; it isn't in the output I read.
+- **Evidence:**
+  - get_deployments shows db with `--bind 127.0.0.1`. api has `DB_HOST=db` and `DB_PORT=6379`, and its readiness probe runs `nc -z db 6379`.
+  - get_logs for `api-7fdd7df845-t4zqh` repeats `ERROR: cannot reach db at db:6379`.
+  - get_pods shows api Running but 0/1 ready, with no restarts.
+
+**What follows from it (not separate faults)**
+- deployment/api never becomes ready, so its `api` Service most likely has no endpoints. I didn't query the Service, so this is inferred.
+- deployment/web's probe `wget http://api:8080/` fails. get_logs for `web-6b6bcf754-dt7z2` shows `can't connect to remote host (10.96.240.28): Connection refused`, and get_pods shows web at 0/1 ready.
+- api and web should both become ready once db is fixed. Their own configuration doesn't need to change.
+
+------------TOTAL METRICS------------
+
+steps 3  in 3009 (uncached 1x)  out 832  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0295 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-chain 
+recreated k8s-reconcile-chain, waiting 15s for it to settle
+
+I found one fault and fixed it. The namespace is now healthy.
+
+**Fault 1: Deployment/db**
+- **What was wrong:** Redis was started with `args: ["--bind", "127.0.0.1"]`, so it only accepted connections from inside its own pod. db looked healthy (1/1 ready, and its log said "Ready to accept connections"), but nothing else could connect to it. api kept logging `ERROR: cannot reach db at db:6379`, and its readiness probe (`nc -z db 6379`) failed. web checks that api is reachable before it reports ready, so web stayed not ready too. The api and web deployments were not themselves broken.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}`. Redis now listens on all interfaces, so other pods can connect through the `db` service.
+- **Rollout result:** Complete. 1 of 1 pods run the new template, 1 is available, none from the old template are still running, and it stayed up for 10s without restarting.
+
+**Namespace status:** Healthy. After the patch, all three pods are Running and ready 1/1 with no restarts: api, db (the new pod `db-58444d9db-gtsft`) and web. I didn't change api or web; they became ready once they could reach db.
+
+------------TOTAL METRICS------------
+
+steps 4  in 6013 (uncached 1x)  out 1352  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0527 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/db  {"spec":{"template":{"spec":{"containers":[{"name":"db","args":["--bind","0.0.0.0"]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+**Fault 1: `deployment/api` has the wrong database host.**
+
+- **Field:** container `api`, env `DB_HOST`, currently `"postgres"`.
+- **Fix:** point `DB_HOST` at the host that actually serves the database. The `db` deployment runs `redis:7.4` and listens on 6379, so the host should be the name of the Service in front of it. That is most likely `db`, but I did not list Services, so confirm the name before changing it. `DB_PORT` is `6379`, which matches the db container, so only the host needs to change.
+- **Evidence:**
+  - get_pods: `api-5564954b58-lw8qt` is Running with ready=0/1, and the container has no restarts.
+  - get_deployments: `api` has `DB_HOST=postgres`, `DB_PORT=6379`, and a readiness probe that runs `nc -z` against those values. The deployment reports Available=False (MinimumReplicasUnavailable). The `db` deployment is `redis:7.4` on 6379 and is healthy.
+  - get_events: the readiness probe fails repeatedly with `nc: bad address 'postgres'`. That is a name-resolution failure, so no host named `postgres` exists in the namespace.
+  - get_logs (api pod): `nc: bad address 'postgres'` followed by `ERROR: cannot reach db at postgres:6379`, repeated on every loop.
+
+**Summary:** The api pod is running and has not crashed. Its readiness probe keeps failing because `DB_HOST` names a host, `postgres`, that does not resolve. Changing `DB_HOST` to the db Service name should make the probe pass and bring `api` to 1/1 ready.
+
+------------TOTAL METRICS------------
+
+steps 3  in 2636 (uncached 1x)  out 1032  cache_write 0 (1.25x)  cache_read 4368 (0.1x)
+cost $0.0008 (claude-haiku-5-5)
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+There was one fault in the namespace, and it is fixed.
+
+**Fault: `deployment/api` had the wrong database host.**
+- **What was wrong:** The container's `DB_HOST` was `postgres`, which does not resolve in this namespace. The api's logs showed `nc: bad address 'postgres'` on every check. The namespace has no `postgres` workload. Its only database is the `db` deployment, a redis:7.4 server on port 6379, which matches the api's `DB_PORT` of 6379. The readiness probe failed for the same reason, so the api never became available.
+- **Patch applied:** Set `DB_HOST` to `db` on the `api` container.
+- **Rollout result:** "rollout of deployment/api complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s." The new pod `api-7d75889d9-7wgnz` is 1/1 ready with no restarts.
+
+**Caveat:** I inferred `db` from the deployment name. I did not read a Service object, because the tools cannot list Services. The readiness probe passing on the new pod is the evidence that the name resolves. The `db` deployment itself was healthy and I did not change it.
+
+**Leftover:** The old api pod `api-5564954b58-pl2mp` is still listed as Running with 0/1 ready. It belongs to the superseded ReplicaSet and should be removed by the Deployment controller. I cannot delete pods, so if it lingers, deleting it is a manual step. It does not affect the new pod's availability.
+
+**Namespace status:** Healthy. `api` has a ready replica on the corrected template, and `db` is ready and unchanged.
+
+------------TOTAL METRICS------------
+
+steps 5  in 8687 (uncached 1x)  out 1559  cache_write 0 (1.25x)  cache_read 10195 (0.1x)
+cost $0.0018 (claude-haiku-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+**Fault 1**
+- **Object:** deployment/api, container `api`
+- **Wrong field:** env `DB_HOST`, currently `"postgres"`. That name doesn't resolve in this namespace. The database here is deployment/db, which runs `redis:7.4` on port 6379/TCP.
+- **Fix:** Set `DB_HOST` to the name of the Service in front of deployment/db, probably `db`. I can't list Services with these tools, so check that name before applying it. `DB_PORT=6379` already matches the db container's port and doesn't need to change.
+- **Evidence:**
+  - get_logs (api-5564954b58-rzrdq) repeats `nc: bad address 'postgres'` / `ERROR: cannot reach db at postgres:6379`. This is a DNS lookup failure, not a refused connection.
+  - get_pods shows the api pod Running but `ready=0/1`, while db is `1/1`.
+  - get_deployments shows the api readiness probe runs `nc -z "$DB_HOST" "$DB_PORT"`, so it fails for the same reason. As a result, api reports `Available=False` (MinimumReplicasUnavailable). The same output shows deployment/db as `redis:7.4`, port 6379, and healthy.
+
+------------TOTAL METRICS------------
+
+steps 3  in 1920 (uncached 1x)  out 583  cache_write 0 (1.25x)  cache_read 4368 (0.05x)
+cost $0.0202 (claude-opus-5-5)
+
+ NEW SCENARIO: k8s-reconcile-wrong-host 
+recreated k8s-reconcile-wrong-host, waiting 15s for it to settle
+
+I fixed the broken workload: deployment/api had the wrong database hostname. The new api pod now passes its readiness check.
+
+**Fault: Deployment/api**
+- **What was wrong:** The env var `DB_HOST` was set to `"postgres"`, and that name doesn't resolve in this namespace. The logs and the readiness probe events both show `nc: bad address 'postgres'`, so the pod never became ready (0/1). The only database here is deployment/db, a redis container on port 6379, which is the same port as `DB_PORT=6379`.
+- **Patch applied:** `{"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}`
+- **About the new value:** I can't list Services, so I never saw one called `db`. I chose that name because it matches the deployment, and the rollout confirmed it works: the readiness probe connects to `db:6379`.
+- **Rollout result:** "rollout of deployment/api complete: 1 of 1 pods run the new template, 1 available, 0 from the old template still running, and stayed up without restarting for 10s." The new pod `api-7d75889d9-ps5jh` is Running and 1/1 ready.
+
+I didn't touch deployment/db, which was healthy throughout (1/1 ready).
+
+**Namespace status:** Healthy. Both api and db are available. The old pod `api-5564954b58-c7jkq` still appeared in the final pod list at 0/1, but the rollout reports no old-template pods still running, so it should just be shutting down.
+
+------------TOTAL METRICS------------
+
+steps 4  in 5244 (uncached 1x)  out 1143  cache_write 0 (1.25x)  cache_read 8156 (0.05x)
+cost $0.0455 (claude-opus-5-5)
+
+------------PATCHES APPLIED (1)------------
+1. deployment/api  {"spec":{"template":{"spec":{"containers":[{"name":"api","env":[{"name":"DB_HOST","value":"db"}]}]}}}}

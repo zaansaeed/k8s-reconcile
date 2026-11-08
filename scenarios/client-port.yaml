@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8s-reconcile-client-port
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache
+  namespace: k8s-reconcile-client-port
+spec:
+  selector:
+    app: cache
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: k8s-reconcile-client-port
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      containers:
+        - name: cache
+          image: redis:7.4
+          ports:
+            - containerPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: k8s-reconcile-client-port
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: busybox:1.36
+          env:
+            - name: CACHE_HOST
+              value: cache
+            - name: CACHE_PORT
+              value: "6380"
+          command: ["sh", "-c"]
+          args:
+            - |
+              while true; do
+                if nc -z -w 2 "$CACHE_HOST" "$CACHE_PORT"; then
+                  echo "cache ok"
+                else
+                  echo "ERROR: cannot reach cache at $CACHE_HOST:$CACHE_PORT"
+                fi
+                sleep 5
+              done
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "nc -z -w 2 \"$CACHE_HOST\" \"$CACHE_PORT\""]
+            periodSeconds: 5
+            timeoutSeconds: 3

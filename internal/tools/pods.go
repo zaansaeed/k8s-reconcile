@@ -24,7 +24,11 @@ func (t *Toolbox) GetPods(ctx context.Context) (string, error) {
 
 	var b strings.Builder
 	for _, p := range pods.Items {
-		fmt.Fprintf(&b, "%s  %s  ready=%s  restarts=%s", p.Name, p.Status.Phase, readyCount(p), restartBucket(p))
+		phase := string(p.Status.Phase)
+		if p.DeletionTimestamp != nil {
+			phase = "Terminating"
+		}
+		fmt.Fprintf(&b, "%s  %s  ready=%s  restarts=%s", p.Name, phase, readyCount(p), restartBucket(p))
 		if r := containerProblems(p); r != "" {
 			fmt.Fprintf(&b, "  %s", r)
 		}

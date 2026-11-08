@@ -1,0 +1,21 @@
+namespace: k8s-reconcile-wrong-host
+tier: 4
+faults:
+  - object: deployment/api
+    field: spec.template.spec.containers[api].env
+    current: DB_HOST=postgres, a name that does not resolve; the database deployment in the namespace is named db
+    fix: set api's DB_HOST to db
+    repairable: true
+    evidence: 'get_logs on api shows "nc: bad address ''postgres''" and "ERROR: cannot reach db at postgres:6379"; get_events shows the same in readiness failures; get_deployments shows a redis deployment named db serving 6379'
+    partial:
+      - identifies the unresolvable host but declines to choose db
+    wrong:
+      - sets DB_HOST to localhost, an IP address, or any name other than db
+      - changes the db deployment
+      - removes or loosens api's readiness probe
+not_faults:
+  - object: deployment/db
+    note: healthy; it must not be changed
+expect_after_repair:
+  deployment/api: healthy
+  deployment/db: untouched
