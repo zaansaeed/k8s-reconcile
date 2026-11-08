@@ -33,12 +33,6 @@ type StepInfo struct {
 	Elapsed time.Duration
 }
 
-func (agent *Agent) emit(info StepInfo) {
-	if agent.OnStep != nil {
-		agent.OnStep(info)
-	}
-}
-
 // New returns an Agent that gives up after maxSteps model calls.
 func New(client *llm.Client, toolbox *tools.Toolbox, run *telemetry.Run, maxSteps int) *Agent {
 	return &Agent{client: client, toolbox: toolbox, run: run, maxSteps: maxSteps}
@@ -66,7 +60,7 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 		}
 		agent.run.Record(reply.Usage) //record metrics
 
-		switch reply.StopReason {
+		switch reply.Message.StopReason {
 		case anthropic.StopReasonMaxTokens:
 			return nil, fmt.Errorf("step %d: response hit max_tokens, output truncated", step)
 		case anthropic.StopReasonRefusal:
@@ -83,13 +77,15 @@ func (agent *Agent) Run(ctx context.Context, task string) (*Result, error) {
 			reply.Calls[i].Output = output
 		}
 
-		agent.emit(StepInfo{
-			N:       step,
-			Text:    reply.Text,
-			Calls:   reply.Calls,
-			Usage:   reply.Usage,
-			Elapsed: elapsed,
-		})
+		if agent.OnStep != nil {
+			agent.OnStep(StepInfo{
+				N:       step,
+				Text:    reply.Text,
+				Calls:   reply.Calls,
+				Usage:   reply.Usage,
+				Elapsed: elapsed,
+			})
+		}
 
 		if len(reply.Calls) == 0 { // no more tool calls. we must be done.
 			return &Result{Answer: reply.Text, Steps: step}, nil

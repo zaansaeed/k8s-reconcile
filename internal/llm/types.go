@@ -37,9 +37,8 @@ func (usage *Usage) Add(other Usage) {
 }
 
 type Reply struct {
-	Message    *anthropic.Message
-	Text       string
-	Calls      []ToolCall
-	Usage      Usage
-	StopReason anthropic.StopReason
+	Message *anthropic.Message
+	Text    string
+	Calls   []ToolCall
+	Usage   Usage
 }

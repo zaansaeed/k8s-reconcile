@@ -23,18 +23,6 @@ var prices = map[string]price{
 
 const tokensPerMillion = 1_000_000.0
 
-func CostUSD(model string, usage llm.Usage) (float64, bool) {
-	rate, known := prices[model]
-	if !known {
-		return 0, false
-	}
-	cost := float64(usage.InputTokens)*rate.input +
-		float64(usage.OutputTokens)*rate.output +
-		float64(usage.CacheReadTokens)*rate.cacheRead +
-		float64(usage.CacheWriteTokens)*rate.cacheWrite
-	return cost / tokensPerMillion, true
-}
-
 type Run struct {
 	Model string
 	Steps int
@@ -46,8 +34,18 @@ func (run *Run) Record(usage llm.Usage) {
 	run.Usage.Add(usage)
 }
 
+// CostUSD prices the run's tokens. It reports false for a model with no price.
 func (run *Run) CostUSD() (float64, bool) {
-	return CostUSD(run.Model, run.Usage)
+	rate, known := prices[run.Model]
+	if !known {
+		return 0, false
+	}
+	u := run.Usage
+	cost := float64(u.InputTokens)*rate.input +
+		float64(u.OutputTokens)*rate.output +
+		float64(u.CacheReadTokens)*rate.cacheRead +
+		float64(u.CacheWriteTokens)*rate.cacheWrite
+	return cost / tokensPerMillion, true
 }
 
 // UsageLine formats token counts, labelling the cache counts with their price

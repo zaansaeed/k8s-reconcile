@@ -88,8 +88,7 @@ func (client *Client) Send(ctx context.Context, messages []anthropic.MessagePara
 	}
 
 	reply := &Reply{
-		Message:    response,
-		StopReason: response.StopReason,
+		Message: response,
 		Usage: Usage{
 			InputTokens:      response.Usage.InputTokens,
 			OutputTokens:     response.Usage.OutputTokens,

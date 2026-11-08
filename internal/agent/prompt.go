@@ -1,6 +1,6 @@
 package agent
 
-const SystemPrompt = `You are a Kubernetes diagnostician. One namespace has been handed to you with something wrong in it. Find what is wrong and report it precisely.
+const DiagnosePrompt = `You are a Kubernetes diagnostician. One namespace has been handed to you with something wrong in it. Find what is wrong and report it precisely.
 
 Your tools are read-only and scoped to that single namespace. You cannot see or change any other namespace, and you cannot modify anything in this one. This run is diagnosis only.
 

@@ -33,9 +33,9 @@ func main() {
 	allowWrites := flag.Bool("allow-writes", false, "let the agent patch deployments and wait for rollouts; uses the repair prompt")
 	flag.Parse()
 
-	prompt, taskFormat, steps, deadline := agent.SystemPrompt, "Namespace %s has a broken workload. Diagnose the root cause.", 12, 5*time.Minute
+	prompt, instruction, steps, deadline := agent.DiagnosePrompt, "Diagnose the root cause.", 12, 5*time.Minute
 	if *allowWrites { // repair runs wait on rollouts, so they get more steps and time
-		prompt, taskFormat, steps, deadline = agent.RepairPrompt, "Namespace %s has a broken workload. Diagnose and repair it.", 25, 15*time.Minute
+		prompt, instruction, steps, deadline = agent.RepairPrompt, "Diagnose and repair it.", 25, 15*time.Minute
 	}
 	if *maxSteps == 0 {
 		*maxSteps = steps
@@ -44,16 +44,16 @@ func main() {
 		*timeout = deadline
 	}
 	if *task == "" {
-		*task = fmt.Sprintf(taskFormat, *namespace)
+		*task = fmt.Sprintf("Namespace %s has a broken workload. %s", *namespace, instruction)
 	}
 
 	rules := clientcmd.NewDefaultClientConfigLoadingRules() // the same lookup kubectl uses
 	rules.ExplicitPath = *kubeconfig
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
+	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, nil).ClientConfig()
 	if err != nil {
 		log.Fatalf("loading kubeconfig: %v", err)
 	}
-	clientset, err := kubernetes.NewForConfig(cfg)
+	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		log.Fatalf("creating clientset: %v", err)
 	}
@@ -74,9 +74,7 @@ func main() {
 		toolbox.EnableWrites()
 	}
 
-	config := llm.DefaultConfig(prompt)
-	config.Model = llm.ResolveModel(*model)
-	client := llm.New(config, toolbox.Specs())
+	client := llm.New(llm.DefaultConfig(prompt, *model), toolbox.Specs())
 	run := &telemetry.Run{Model: client.Model()}
 	ag := agent.New(client, toolbox, run, *maxSteps) //init agent
 	if *verbose {
@@ -145,7 +143,7 @@ func dumpTools(ctx context.Context, toolbox *tools.Toolbox, pod string, previous
 		if err != nil {
 			return fmt.Errorf("%s: %w", spec.Name, err)
 		}
-		fmt.Println("\n ------------Tool------------ %s\n", spec.Name)
+		fmt.Printf("\n ------------Tool------------ %s\n", spec.Name)
 		fmt.Print(out)
 	}
 	return nil

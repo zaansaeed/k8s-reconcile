@@ -19,15 +19,15 @@ const maxDeployments = 10
 // replica counts, rollout conditions and the pod template. This is the desired
 // state the model compares against what get_pods and get_events report.
 func (t *Toolbox) GetDeployments(ctx context.Context) (string, error) {
-	deps, err := t.client.AppsV1().Deployments(t.namespace).List(ctx, metav1.ListOptions{})
+	deployments, err := t.client.AppsV1().Deployments(t.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return "", fmt.Errorf("listing deployments in %s: %w", t.namespace, err)
 	}
-	if len(deps.Items) == 0 {
+	if len(deployments.Items) == 0 {
 		return fmt.Sprintf("no deployments in namespace %s\n", t.namespace), nil
 	}
 
-	items := deps.Items
+	items := deployments.Items
 	if len(items) > maxDeployments {
 		items = items[:maxDeployments]
 	}
@@ -140,12 +140,8 @@ func envSource(e corev1.EnvVar) string {
 		return fmt.Sprintf("from secret/%s key %s (value not shown)", v.SecretKeyRef.Name, v.SecretKeyRef.Key)
 	case v.ConfigMapKeyRef != nil:
 		return fmt.Sprintf("from configmap/%s key %s", v.ConfigMapKeyRef.Name, v.ConfigMapKeyRef.Key)
-	case v.FieldRef != nil:
-		return fmt.Sprintf("from field %s", v.FieldRef.FieldPath)
-	case v.ResourceFieldRef != nil:
-		return fmt.Sprintf("from resource %s", v.ResourceFieldRef.Resource)
 	default:
-		return "from an unrecognized source"
+		return "from another source"
 	}
 }
 

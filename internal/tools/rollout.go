@@ -99,16 +99,16 @@ func rolloutStatus(d *appsv1.Deployment) (rolloutState, string) {
 	}
 
 	desired := desiredReplicas(d)
-	s := d.Status
+	status := d.Status
 	switch {
-	case s.ObservedGeneration < d.Generation:
+	case status.ObservedGeneration < d.Generation:
 		return rolloutInProgress, "the controller has not processed the latest change yet"
-	case s.UpdatedReplicas < desired:
-		return rolloutInProgress, fmt.Sprintf("%d of %d pods run the new template", s.UpdatedReplicas, desired)
-	case s.Replicas > s.UpdatedReplicas:
-		return rolloutInProgress, fmt.Sprintf("%d pods from the old template are still running", s.Replicas-s.UpdatedReplicas)
-	case s.AvailableReplicas < desired:
-		return rolloutInProgress, fmt.Sprintf("%d of %d new pods are available", s.AvailableReplicas, desired)
+	case status.UpdatedReplicas < desired:
+		return rolloutInProgress, fmt.Sprintf("%d of %d pods run the new template", status.UpdatedReplicas, desired)
+	case status.Replicas > status.UpdatedReplicas:
+		return rolloutInProgress, fmt.Sprintf("%d pods from the old template are still running", status.Replicas-status.UpdatedReplicas)
+	case status.AvailableReplicas < desired:
+		return rolloutInProgress, fmt.Sprintf("%d of %d new pods are available", status.AvailableReplicas, desired)
 	default:
 		return rolloutComplete, fmt.Sprintf("all %d pods run the new template and are available", desired)
 	}

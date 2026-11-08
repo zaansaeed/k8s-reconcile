@@ -19,10 +19,11 @@ func ResolveModel(name string) string {
 	return name
 }
 
-// DefaultConfig returns the settings the single-agent baseline run uses.
-func DefaultConfig(system string) Config {
+// DefaultConfig returns the settings the single-agent baseline run uses, for
+// the given system prompt and model (an alias such as "haiku", or a full ID).
+func DefaultConfig(system, model string) Config {
 	return Config{
-		Model:       ModelOpus,
+		Model:       ResolveModel(model),
 		MaxTokens:   8192,
 		System:      system,
 		CacheSystem: true,

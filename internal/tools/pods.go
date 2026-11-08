@@ -24,8 +24,8 @@ func (t *Toolbox) GetPods(ctx context.Context) (string, error) {
 
 	var b strings.Builder
 	for _, p := range pods.Items {
-		fmt.Fprintf(&b, "%s  %s  ready=%s  restarts=%s", p.Name, p.Status.Phase, readyCount(p), restarts(p))
-		if r := problems(p); r != "" {
+		fmt.Fprintf(&b, "%s  %s  ready=%s  restarts=%s", p.Name, p.Status.Phase, readyCount(p), restartBucket(p))
+		if r := containerProblems(p); r != "" {
 			fmt.Fprintf(&b, "  %s", r)
 		}
 		b.WriteString("\n")
@@ -44,7 +44,7 @@ func readyCount(p corev1.Pod) string {
 	return fmt.Sprintf("%d/%d", ready, len(p.Spec.Containers))
 }
 
-func restarts(p corev1.Pod) string {
+func restartBucket(p corev1.Pod) string {
 	var n int32
 	for _, c := range p.Status.ContainerStatuses {
 		n += c.RestartCount
@@ -61,9 +61,9 @@ func restarts(p corev1.Pod) string {
 	}
 }
 
-// problems summarizes why containers are unhealthy, e.g.
+// containerProblems summarizes why containers are unhealthy, e.g.
 // "nginx waiting: ImagePullBackOff" or "stress last: OOMKilled".
-func problems(p corev1.Pod) string {
+func containerProblems(p corev1.Pod) string {
 	var parts []string
 	for _, c := range p.Status.ContainerStatuses {
 		// State.Waiting and LastTerminationState.Terminated are pointers that
