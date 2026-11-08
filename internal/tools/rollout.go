@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,7 +33,6 @@ const (
 	rolloutInProgress rolloutState = iota
 	rolloutComplete
 	rolloutFailed
-	rolloutUnstable
 )
 
 // WaitForRollout polls a deployment until its rollout completes, fails, or the
@@ -44,9 +42,7 @@ func (t *Toolbox) WaitForRollout(ctx context.Context, name string, timeout time.
 	if timeout <= 0 {
 		timeout = defaultRolloutWait
 	}
-	if timeout > maxRolloutWait {
-		timeout = maxRolloutWait
-	}
+	timeout = min(timeout, maxRolloutWait)
 
 	deadline := time.Now().Add(timeout)
 	var stableSince time.Time
@@ -66,19 +62,21 @@ func (t *Toolbox) WaitForRollout(ctx context.Context, name string, timeout time.
 				return "", err
 			}
 			if problem != "" {
-				return t.rolloutReport(ctx, d, rolloutUnstable, problem, timeout)
+				return t.rolloutReport(ctx, fmt.Sprintf("rollout of deployment/%s deployed but not stable: %s.", name, problem))
 			}
 			if stableSince.IsZero() {
 				stableSince = time.Now()
 			}
 			if time.Since(stableSince) >= rolloutSettle {
-				detail += fmt.Sprintf(", and stayed up without restarting for %s", rolloutSettle)
-				return t.rolloutReport(ctx, d, rolloutComplete, detail, timeout)
+				return t.rolloutReport(ctx, fmt.Sprintf("rollout of deployment/%s complete: %s, and stayed up without restarting for %s.", name, detail, rolloutSettle))
 			}
 		} else {
 			stableSince = time.Time{}
-			if state == rolloutFailed || !time.Now().Before(deadline) {
-				return t.rolloutReport(ctx, d, state, detail, timeout)
+			if state == rolloutFailed {
+				return t.rolloutReport(ctx, fmt.Sprintf("rollout of deployment/%s failed: %s.", name, detail))
+			}
+			if !time.Now().Before(deadline) {
+				return t.rolloutReport(ctx, fmt.Sprintf("rollout of deployment/%s not finished after %s: %s.", name, timeout, detail))
 			}
 		}
 
@@ -100,10 +98,7 @@ func rolloutStatus(d *appsv1.Deployment) (rolloutState, string) {
 		}
 	}
 
-	desired := int32(1)
-	if d.Spec.Replicas != nil {
-		desired = *d.Spec.Replicas
-	}
+	desired := desiredReplicas(d)
 	s := d.Status
 	switch {
 	case s.ObservedGeneration < d.Generation:
@@ -151,26 +146,12 @@ func (t *Toolbox) unstablePod(ctx context.Context, d *appsv1.Deployment) (string
 	return "", nil
 }
 
-// rolloutReport states the verdict and why, then lists every pod in the
+// rolloutReport follows the verdict's headline with every pod in the
 // namespace, since a fix to one deployment can leave another still broken.
-func (t *Toolbox) rolloutReport(ctx context.Context, d *appsv1.Deployment, state rolloutState, detail string, waited time.Duration) (string, error) {
-	var b strings.Builder
-	switch state {
-	case rolloutComplete:
-		fmt.Fprintf(&b, "rollout of deployment/%s complete: %s.\n", d.Name, detail)
-	case rolloutFailed:
-		fmt.Fprintf(&b, "rollout of deployment/%s failed: %s.\n", d.Name, detail)
-	case rolloutUnstable:
-		fmt.Fprintf(&b, "rollout of deployment/%s deployed but not stable: %s.\n", d.Name, detail)
-	default:
-		fmt.Fprintf(&b, "rollout of deployment/%s not finished after %s: %s.\n", d.Name, waited, detail)
-	}
-
+func (t *Toolbox) rolloutReport(ctx context.Context, headline string) (string, error) {
 	pods, err := t.GetPods(ctx)
 	if err != nil {
 		return "", err
 	}
-	b.WriteString("pods now:\n")
-	b.WriteString(pods)
-	return b.String(), nil
+	return headline + "\npods now:\n" + pods, nil
 }

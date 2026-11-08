@@ -42,13 +42,19 @@ func (t *Toolbox) GetDeployments(ctx context.Context) (string, error) {
 	return b.String(), nil
 }
 
+// desiredReplicas returns how many pods a deployment asks for. Kubernetes
+// treats an unset replicas field as 1, so a nil pointer means 1.
+func desiredReplicas(d *appsv1.Deployment) int32 {
+	if d.Spec.Replicas == nil {
+		return 1
+	}
+	return *d.Spec.Replicas
+}
+
 // writeDeployment writes one deployment: replicas and conditions first, since
 // they say whether it is healthy, then its containers and volumes.
 func writeDeployment(b *strings.Builder, d appsv1.Deployment) {
-	desired := int32(1) // Kubernetes treats an unset replicas field as 1
-	if d.Spec.Replicas != nil {
-		desired = *d.Spec.Replicas
-	}
+	desired := desiredReplicas(&d)
 	fmt.Fprintf(b, "deployment/%s  replicas: desired=%d updated=%d ready=%d available=%d\n",
 		d.Name, desired, d.Status.UpdatedReplicas, d.Status.ReadyReplicas, d.Status.AvailableReplicas)
 
