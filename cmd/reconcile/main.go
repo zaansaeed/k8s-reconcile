@@ -18,7 +18,8 @@ import (
 func main() {
 	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig; defaults to $KUBECONFIG, then ~/.kube/config")
 	namespace := flag.String("namespace", "", "namespace to check as it is now")
-	scenario := flag.String("scenario", "", "scenario to recreate and run, e.g. crashloop; the run is appended to results/runs.jsonl")
+	scenario := flag.String("scenario", "", "scenario to recreate and run, e.g. cache-port; the run is appended to -out")
+	out := flag.String("out", "results/runs.jsonl", "with -scenario, the file each run is appended to")
 	model := flag.String("model", "opus", "model to run: opus, sonnet, haiku, or a full model ID")
 	verbose := flag.Bool("verbose", false, "print each step as the agent takes it")
 	dump := flag.Bool("dump", false, "print raw tool output and exit instead of running the agent")
@@ -57,9 +58,11 @@ func main() {
 		return
 	}
 
-	client := llm.New(llm.DefaultConfig(prompt, *model), toolbox.Specs())
+	config := llm.DefaultConfig(prompt, *model)
+	config.CacheHistory = true
+	client := llm.New(config, toolbox.Specs())
 	run := &telemetry.Run{Model: client.Model()}
-	rec := record{Time: time.Now(), Scenario: *scenario, Model: run.Model, Mode: mode}
+	rec := agent.Record{Time: time.Now(), Scenario: *scenario, Model: run.Model, Mode: mode, CacheHistory: config.CacheHistory}
 	ag := agent.New(client, toolbox, run, maxSteps)
 	ag.OnStep = func(info agent.StepInfo) {
 		rec.Steps = append(rec.Steps, info)
@@ -102,7 +105,7 @@ func main() {
 
 	if *scenario != "" {
 		rec.PodsAfter, _ = toolbox.GetPods(context.Background())
-		if err := save(rec); err != nil {
+		if err := save(rec, *out); err != nil {
 			log.Fatal(err)
 		}
 	}

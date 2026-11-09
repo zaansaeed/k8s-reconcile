@@ -1,39 +1,45 @@
 # K8s-Reconcile
 
-An LLM agent that diagnoses and repairs broken Kubernetes workloads, and a benchmark that measures how well different models do it, and at what cost.
+An LLM agent that diagnoses and repairs broken Kubernetes workloads, and a benchmark that measures how well different models do it and what it costs.
 
-The agent is handed one namespace with something wrong in it. It investigates through a small set of read-only tools, explains the root cause, and, when writes are enabled, patches the broken Deployment and checks that the rollout actually recovered. The benchmark recreates each fault from a manifest, runs the agent against it, records every step with its token usage and cost, and grades the result against an answer key using an LLM judge.
+The agent is given one namespace with something wrong in it. It investigates with a few read-only tools and explains the root cause. When writes are enabled, it also patches the broken Deployment and checks that the rollout recovered. The benchmark recreates each fault from a manifest, runs the agent, and records every step with its token usage and cost. An LLM judge then grades the result against an answer key.
 
 **Stack:** Go · client-go · kind · Claude API (Anthropic Go SDK)
+
+**Results in brief** (160 graded runs: 4 tiers × 2 models × diagnose and repair × 10 trials, Claude Haiku 5.5 vs Opus 5.5):
+
+- **Repair.** Opus passed all **40 of 40** repairs. Haiku passed **37 of 40** at **about 1/25 of the cost per passing repair** ($0.0014 vs. $0.0343). On tiers 1–3 it matched Opus at 30 of 30.
+- **Where they split.** Every Haiku repair miss is on tier 4, `cache-port`, a client–server port mismatch. In 3 of 10 runs Haiku first fixed the healthy client. The rollout check caught all 3, and Haiku reverted each one and then fixed the server.
+- **Caching.** Caching the tool and system-prompt prefix plus the conversation history cut agent cost by **53%** (Opus $2.16 vs. $4.63). Uncached input fell to about 10 tokens per run.
+- **No outright fails.** No run failed and no run invented a value. Every miss is a partial: a wrong patch that was reverted, a wrong fix offered as an equal alternative, or a diagnosis without evidence behind it.
 
 ## How it works
 
 ### Scope: one namespace
 
-The agent works at the level of a single **namespace**. Every tool is bound to that namespace when the toolbox is built, so the model never chooses where a tool runs and cannot reach anything outside it. Inside the namespace it sees Deployments, their Pods, events and container logs. It cannot see Services, ConfigMaps or Secrets, and it has no shell or `kubectl`.
+The agent works on a single **namespace**. Every tool is bound to it when the toolbox is built, so the model never chooses where a tool runs and cannot reach anything outside it. Inside the namespace it sees Deployments, their Pods, events and container logs. It cannot see Services, ConfigMaps or Secrets, and it has no shell or `kubectl`.
 
 ```mermaid
 flowchart TB
     subgraph cluster["kind cluster (one node)"]
-        subgraph ns["namespace k8s-reconcile-chain"]
+        subgraph ns["namespace k8s-reconcile-cache-port"]
             direction LR
-            web["Deployment web"] --> webrs["ReplicaSet"] --> webpod["Pod"]
+            cache["Deployment cache"] --> cachers["ReplicaSet"] --> cachepod["Pod"]
             api["Deployment api"] --> apirs["ReplicaSet"] --> apipod["Pod"]
-            db["Deployment db"] --> dbrs["ReplicaSet"] --> dbpod["Pod"]
+            svc["Service cache<br/>(exists, but not visible to the agent)"]
         end
-        other["other namespaces<br/>(not visible to the agent)"]
+        other["other namespaces<br/>(not reachable)"]
     end
     subgraph agent["reconcile agent"]
         toolbox["Toolbox<br/>namespace fixed at construction"]
     end
     toolbox -- "get_pods · get_events<br/>get_deployments · get_logs" --> ns
     toolbox -. "apply_patch<br/>(only with -allow-writes)" .-> ns
-    toolbox -. "no access" .-x other
 ```
 
 ### The agent loop
 
-The agent is a single loop around the Messages API. Each step sends the conversation so far, runs any tools the model asks for, and appends their output. The run ends when the model answers without asking for a tool, or when it hits its step limit.
+The agent is one loop around the Messages API. Each step sends the conversation so far, runs any tools the model asks for, and appends their output. The run ends when the model answers without asking for a tool, or when it reaches its step limit (12 to diagnose, 25 to repair).
 
 ```mermaid
 sequenceDiagram
@@ -42,138 +48,186 @@ sequenceDiagram
     participant T as Toolbox
     participant K as Kubernetes API
 
-    R->>M: system prompt + tools (cached) + task
+    R->>M: tools + system prompt + task
     loop until the model answers without tool calls
         M-->>R: text + tool calls
         R->>T: Dispatch(name, input)
-        T->>K: list / get / patch (namespace-scoped)
+        T->>K: list / get / patch, in this namespace only
         K-->>T: objects
         T-->>R: compact text summary
-        R->>M: tool results
+        R->>M: conversation so far + tool results
     end
-    M-->>R: final answer (cause, field, fix, evidence)
+    M-->>R: final answer: cause, field, fix, evidence
 ```
 
-The tools return compact text, not raw JSON, so a step costs hundreds of tokens rather than thousands:
+The tools return compact text rather than raw JSON, so each result costs hundreds of tokens rather than thousands:
 
 | Tool | Returns |
 |---|---|
 | `get_pods` | One line per pod: phase (or `Terminating`), readiness, a bucketed restart count, and why any container is unhealthy |
-| `get_events` | The newest 20 events, sorted stably, with repeats collapsed |
-| `get_deployments` | Each Deployment's replica counts, conditions and container spec: image, command, env (names and sources, never Secret values), probes, resources, mounts |
-| `get_logs` | The last 50 lines from a pod, optionally from the previous container instance |
+| `get_events` | The newest 20 events in a stable order, with repeats marked |
+| `get_deployments` | Each Deployment's replica counts, conditions and container spec: image, command, args, ports, env (where each value comes from, never Secret values), mounts, probes, resources |
+| `get_logs` | The last 50 log lines from a pod, optionally from the previous container instance |
 | `apply_patch` | Repair mode only; see below |
 
-Tool definitions and the system prompt are sent with a cache breakpoint, so every step after the first reads them at 5–10% of the input price.
+### Prompt caching
 
-### Repairs: guarded writes
-
-`apply_patch` is the only write path, and it is off unless the run passes `-allow-writes`. A patch goes through these checks before and after it reaches the cluster:
+Every step re-sends the whole conversation, so most input tokens are ones the model has already seen. Two cache breakpoints make those cheap:
 
 ```mermaid
 flowchart LR
-    A[patch from the model] --> B{"size ≤ 8 KB,<br/>kind Deployment,<br/>only spec.template?"}
+    A["tool definitions"] --> B["system prompt"] --> C["task"] --> D["step 1 results"] --> E["…"] --> F["latest step's results"]
+    B -.- B1(["breakpoint 1: fixed<br/>shared by every run"])
+    F -.- F1(["breakpoint 2: automatic<br/>moves to the end each step"])
+```
+
+- **Breakpoint 1** sits on the system prompt. Tools and system prompt are identical in every run, so each run reads them from cache instead of paying to write them again.
+- **Breakpoint 2** is the API's automatic caching. It moves to the end of each request, so every step reads the conversation so far at 5–10% of the input price and pays full price only for what the last step added.
+
+The judge makes one request per run, so it uses only breakpoint 1. Automatic caching would make it pay a 25% premium to write a prompt it never sends again.
+
+### Repairs: guarded writes
+
+`apply_patch` is the only way to change anything, and it is off unless the run passes `-allow-writes`. Every patch goes through these steps:
+
+```mermaid
+flowchart LR
+    A[patch from the model] --> B{"≤ 8 KB, kind Deployment,<br/>only spec.template?"}
     B -- no --> X[rejected, reason returned to the model]
     B -- yes --> C[server-side dry run]
     C -- error --> X
     C -- ok --> D[apply + audit log]
-    D --> E[watch the rollout]
-    E --> F{new pods}
-    F -- "a new pod fails" --> G["deployed but not stable<br/>(returns within seconds)"]
-    F -- "all up and stable for 10s" --> H[complete]
-    F -- "still waiting at 90s" --> I[not finished]
-    G & H & I --> J[verdict + every pod in the namespace,<br/>back to the model]
+    D --> E{watch the new pods}
+    E -- "one fails" --> G["deployed but not stable<br/>(within seconds)"]
+    E -- "all up for 5s" --> H[complete]
+    E -- "still waiting at 60s" --> I[not finished]
+    G & H & I --> J["verdict + every pod in the namespace,<br/>back to the model"]
 ```
 
-The rollout check is what lets the agent correct itself. It only looks at pods from the Deployment's current template, so a fix that reveals a second fault, or a fix applied on the wrong side, comes back to the model as a failure it can read and act on.
+The rollout check is what lets the agent correct itself. It judges only pods from the Deployment's newest template. A fix that reveals a second fault, or a fix applied on the wrong side, therefore comes back to the model as a failure it can read and act on.
 
-**Safety rules, enforced in code:** the namespace lock, writes off by default, no shell, Secret values never returned (only key names), patches limited to `spec.template`, and every applied patch recorded in an audit log.
+**Enforced in code:**
+
+- the namespace lock;
+- writes off by default;
+- no shell;
+- Secret values never returned (only names and keys);
+- patches limited to `spec.template`;
+- an audit log of every patch that reached the cluster.
 
 ## The benchmark
 
 ```mermaid
 flowchart LR
     subgraph scen["scenarios/"]
-        M["name.yaml<br/>(broken manifest)"]
-        T["truths/name.yaml<br/>(answer key + settle time)"]
+        M["tier.yaml<br/>broken manifest"]
+        T["truths/tier.yaml<br/>answer key"]
     end
-    M --> R1["recreate<br/>delete namespace, apply manifest"]
-    T --> R2
-    R1 --> R2["settle<br/>wait the measured time"]
-    R2 --> A["agent run<br/>diagnose or repair"]
-    A --> J1[("results/runs.jsonl<br/>steps, tool output, answer,<br/>tokens, cost, patches, pods after")]
-    J1 --> JD["judge<br/>manifest + truth + transcript"]
-    T --> JD
+    M --> R1["recreate<br/>force-delete pods, delete namespace,<br/>apply manifest, settle 10s"]
+    R1 --> A["agent run<br/>diagnose or repair"]
+    A --> J1[("runs.jsonl<br/>every step and tool output,<br/>answer, tokens, cost,<br/>patches, pods afterwards")]
+    J1 --> JD["judge"]
     M --> JD
-    JD --> J2[("results/grades.jsonl<br/>per-fault verdict, wrong patches,<br/>overall pass / partial / fail")]
+    T --> JD
+    JD --> J2[("grades.jsonl<br/>verdict per fault, wrong patches,<br/>pass / partial / fail")]
 ```
 
-**Answer keys.** Every scenario has a truth file listing each fault: the object and field, the correct fix, whether it is repairable without information the agent can't see, what counts as partial credit, and which tempting fixes are wrong. It also lists objects that look suspicious but are healthy, and the state every Deployment should end in after a repair.
+**Answer keys.** Each tier has a truth file that lists every fault with:
 
-**Reproducible inputs.** Two runs of the same scenario should give the model the same tool output. Restart counts are bucketed (`none / 1 / several / many`). `ErrImagePull` and `ImagePullBackOff`, which alternate forever, are reported as one state. Each scenario waits a settle time measured from its own pod timeline, so it starts in the middle of a stable window: 15s for most, 30–80s for crash loops.
+- the object and field;
+- the correct fix;
+- whether the fault can be repaired without information the agent can't see;
+- what earns partial credit;
+- which tempting fixes are wrong.
 
-**Grading.** `cmd/judge` gives one model the manifest, the truth file and the full transcript, and requires it to answer through a strict-schema tool: a verdict per fault (correct, partial, wrong or missed), how many wrong patches reached the cluster, whether a healthy object was touched, and whether a value was invented. On a calibration set of 24 runs it matched hand grades on 23. The rubric was then tightened on the one disagreement.
+It also lists objects that look suspicious but are healthy, and the state each Deployment should end in after a repair.
 
-## Scenarios
+**Reproducible inputs.** Two runs of the same tier should give the model the same tool output:
 
-Each scenario runs in its own namespace. The tiers rise with how much reasoning a fault takes, not with how much is broken.
+- Restart counts are bucketed (`none / 1 / several / many`).
+- `ErrImagePull` and `ImagePullBackOff`, which alternate forever, are reported as one state.
+- Each run recreates its namespace from scratch and waits 10s, which is enough for every tier to reach its broken state. Pods are force-deleted first, because the scenarios' shell loops ignore SIGTERM and would otherwise hold each delete for the 30s grace period.
 
-| Scenario | Tier | Fault | What it tests |
+**Grading.** `cmd/judge` gives a model (Opus 5.5) the manifest, the truth file and the full transcript. The model answers through a strict-schema tool that reports:
+
+- a verdict per fault: correct, partial, wrong or missed;
+- how many wrong patches reached the cluster;
+- whether a healthy object was touched;
+- whether a value was invented;
+- an overall pass, partial or fail.
+
+The judge was calibrated against hand grades on an earlier 24-run set, where it agreed on 23.
+
+## Tiers
+
+Each tier runs in its own namespace. The tiers rise with how much reasoning a fault takes, not with how much is broken.
+
+| Tier | Scenario | Fault | What it tests |
 |---|---|---|---|
-| `bad-image` | 1 | Image tag doesn't exist | Reading a pull error from events |
-| `crashloop` | 1 | Startup script exits because `DATABASE_URL` is unset | Not inventing a value it can't know: the correct outcome is a report, not a patch |
-| `unschedulable` | 2 | 64Gi memory request on a small node | Reading scheduler events for a pod that never started |
-| `liveness-probe` | 3 | Liveness probe on `/healthz`, which nginx returns 404 for | A restart loop that looks like a crash but is the kubelet killing a healthy app |
-| `multi-fault` | 3 | Bad image tag hiding a missing env var, a wrong probe port, and a healthy decoy | Several faults at once, one only visible after another is fixed, and leaving the healthy Deployment alone |
-| `slow-start` | 4 | App sleeps 15s before listening; the liveness probe kills it at 2s | The same "connection refused" as a wrong port, but the port is fine and the cause is timing |
-| `cache-port` | 4 | Redis runs with `--port 6380`; the client and Service use 6379 | The cause is in a healthy-looking Deployment, and the error message shows the *correct* port |
-| `client-port` | 4 | The client is set to port 6380; Redis is correct on 6379 | The mirror of `cache-port`: here the fix is on the client |
-| `chain` | 4 | `db` binds to 127.0.0.1, so `api` can't reach it and `web` can't reach `api` | Following a symptom back two hops; removing a probe would turn every pod green while `db` is still broken |
-| `wrong-host` | 4 | The client points at `postgres`; the database Deployment is `db` | Taking the right value from another object instead of inventing one |
-| `http-port` | 4 | The backend runs `httpd -p 8081` but declares 8080, and its Service forwards to 8080 | Like `cache-port`, but the server's log is empty, so only the spec shows which side is wrong |
-| `auth-mismatch` | 4 | The client's Redis password doesn't match the server's; a second client uses the right one | Two equally easy fixes, but changing the server's password locks out the healthy client |
-| `service-name` | 4 | The client uses the Deployment's name `redis`; the Service is named `cache`, which a healthy client uses | The Deployment name, right in `wrong-host`, is the wrong answer here; the healthy peer has the right one |
+| 1 | `bad-image` | Image tag doesn't exist | Reading the pull error from events, not just guessing from the tag |
+| 2 | `unschedulable` | 64Gi memory request on a small node | Reading scheduler events for a pod that never started, and fixing the request instead of asking for a bigger node |
+| 3 | `multi-fault` | Bad image tag hiding a missing `DATABASE_URL`, a readiness probe on the wrong port, and a healthy decoy | Several faults at once, one visible only after another is fixed. The agent must report the missing value without inventing it and leave the healthy Deployment alone |
+| 4 | `cache-port` | Redis runs with `--port 6380`; the client and the Service use 6379 | The cause is in the healthy-looking Deployment, and the error message shows only the *correct* port |
 
-`http-port`, `auth-mismatch` and `service-name` were built to test whether `cache-port`'s difficulty came from its two-sided shape. They didn't separate the models (see below), which narrowed down what makes `cache-port` hard. Three earlier scenarios, which every model solved and which overlapped with others, are kept in `scenarios/retired/` so their past runs remain explainable.
+## Results
 
-## Results so far
+160 runs: each tier × {Haiku, Opus} × {diagnose, repair} × 10 trials. Four tier loops ran in parallel, finishing in about 31 minutes.
 
-171 runs over two experiments, all graded by the judge (Opus 5.5) against the answer keys. Claude Haiku 5.5 and Opus 5.5, diagnose and repair, 16 scenarios including the 3 retired ones.
+**Passes out of 10:**
 
-| | Runs | Pass | Partial | Fail | Avg steps | Avg time | Cost per run | Caching saves |
-|---|---|---|---|---|---|---|---|---|
-| Haiku, diagnose | 48 | 37 | 9 | 2 | 2.9 | 6s | $0.0009 | 27% |
-| Haiku, repair | 47 | 42 | 4 | 1 | 4.9 | 34s | $0.0022 | 27% |
-| Opus, diagnose | 38 | 38 | 0 | 0 | 3.0 | 8s | $0.0268 | 33% |
-| Opus, repair | 38 | 38 | 0 | 0 | 4.1 | 25s | $0.0465 | 38% |
+| Tier | Haiku diagnose | Haiku repair | Opus diagnose | Opus repair |
+|---|---|---|---|---|
+| 1 `bad-image` | 7 | 10 | 10 | 10 |
+| 2 `unschedulable` | 8 | 10 | 10 | 10 |
+| 3 `multi-fault` | 6 | 10 | 10 | 10 |
+| 4 `cache-port` | **1** | **7** | 6 | 10 |
+| **Total** | 22 / 40 | 37 / 40 | 36 / 40 | 40 / 40 |
 
-### Where the models differ
+Every run that didn't pass was graded partial; none failed.
 
-Opus passed every run. Haiku passed every run on 12 of the 13 active scenarios. Nearly all of its misses are on one:
+**Repair is more reliable than diagnosis.** A diagnosis only has to sound right. A repair has to survive the rollout check, which turns a wrong idea into a failure the model reads and corrects. Haiku's pass rate rises from 55% diagnosing to 93% repairing.
 
-| `cache-port` | Haiku | Opus |
+**Why diagnoses lose credit:**
+
+| Reason | Where | Runs |
 |---|---|---|
-| Diagnose | 1 pass, 6 partial, 2 fail (of 9) | 8 of 8 pass |
-| Repair | 3 pass, 4 partial, 1 fail (of 8) | 8 of 8 pass |
-| Repairs with a wrong patch | 5 of 8 (4 recovered, 1 left broken) | 0 of 8 |
+| Offers the wrong-side fix (`api` CACHE_PORT=6380) as an equal alternative | Tier 4 | Haiku 9, Opus 4 |
+| Offers a wrong fix alongside the right one (probe → move the container to 8080; request → add a bigger node) | Tiers 2–3 | Haiku 6 |
+| Right cause and fix, but skipped `get_events`, so no evidence the tag doesn't exist | Tier 1 | Haiku 3 |
 
-Every miss is the same mistake. Haiku treats changing the client's `CACHE_PORT` to 6380 as a valid fix. In diagnoses it offers that as an equal alternative; in repairs it applies it first. The patch can't work, because the Service only exposes 6379, so the rollout check reports it unfinished. In 4 of 5 cases Haiku then read the new pod's logs, reverted, and fixed the server. In the fifth it stopped, blaming a Service it couldn't see. Its reasoning shows the trap: *"I left `deployment/cache` alone because it is healthy and the client was the side that did not match."*
+**Tier 4 is where the models split.** The client's error message, `cannot reach cache at cache:6379`, contains only correct values. The client's explicit `CACHE_PORT=6379` visibly disagrees with what redis runs. The only evidence that redis is the wrong side is its declared `containerPort: 6379`, plus the Service the agent can't see. Haiku patched the client first in 3 of 10 repairs. The rollout came back not finished because the Service only exposes 6379, and Haiku reverted the patch and fixed redis. Opus never touched the client.
 
-The second experiment ran 5 repeats per model on `cache-port` and three new scenarios built on the same two-sided pattern. Haiku solved all 30 runs of the three new ones. So the difficulty is narrower than "two sides could be fixed". In `cache-port`:
+**Cost.**
 
-- the broken pod's own error message contains only correct values (`cannot reach cache at cache:6379`),
-- the client holds an explicit setting that visibly disagrees with what the server actually runs (`CACHE_PORT=6379` against redis's `port=6380`),
-- the only in-cluster evidence that the server is the wrong side is its declared `containerPort: 6379`, and no healthy peer settles it.
+| | Cost per run | Cost per pass | Total, 40 runs |
+|---|---|---|---|
+| Haiku, diagnose | $0.0006 | $0.0011 | $0.024 |
+| Haiku, repair | $0.0013 | $0.0014 | $0.051 |
+| Opus, diagnose | $0.0197 | $0.0219 | $0.788 |
+| Opus, repair | $0.0343 | $0.0343 | $1.373 |
 
-In `auth-mismatch` and `service-name`, a healthy client shows the right value, and Haiku used it every time. In `http-port`, the client's URL has no port to change.
+- Haiku costs about 25× less per passing repair and 20× less per passing diagnosis.
+- Repair costs about twice as much as diagnosis: more steps (about 4–6 vs. 3) and a longer history re-read at each step.
+- Tiers 3 and 4 cost about twice as much as tiers 1–2, for both models.
+- All 160 agent runs cost $2.24. Grading them cost $3.55, about $0.022 per run.
 
-### Cost
+**Caching.**
 
-- Haiku costs 20–30× less per run than Opus. Across all 171 runs, Haiku cost $0.15 and Opus $2.78.
-- Caching the tool definitions and system prompt cut cost by 27–38% per run. The rest of the input is conversation history, which is not cached yet.
-- Grading all 171 runs cost $4.16, about $0.024 per run. On a 24-run calibration set the judge agreed with hand grades on 23. Graded twice, it gave the same verdict on every run the rubric change didn't target.
+| | Actual | Every input token at full price | Saved |
+|---|---|---|---|
+| Haiku | $0.075 | $0.148 | 49% |
+| Opus | $2.16 | $4.63 | 53% |
 
-Counts are out of 5–9 runs per cell. They show a consistent pattern on one fault type, not a precise failure rate.
+An average repair re-reads 12–17k cached tokens and sends about 12 uncached ones. The savings are larger on repair (53–56%) than on diagnosis (42–48%), because longer runs re-read more history. What caching can't touch is output, mostly thinking, and output is most of what remains.
+
+## Limits
+
+- **Ten trials per cell.** The results show a consistent pattern on tier 4, not a precise failure rate.
+- **One judge.** Opus grades every run, including its own. It was calibrated against hand grades but never compared with a different judge model.
+- **What the agent can't see.** It has no view of Services, ConfigMaps, Secrets or init containers. Tier 4 depends on that by design: with the Service visible, the right side would be obvious.
+- **One single-node kind cluster,** with faults in Deployment specs only. No network, node or storage failures.
+
+Earlier experiments with 13 scenarios and 165 runs, including the caching A/B, are in git history at commit `bd5d3e0`.
 
 ## Running it
 
@@ -190,42 +244,60 @@ Check a namespace as it is now:
 go run ./cmd/reconcile -namespace my-namespace -model haiku -verbose
 ```
 
-Benchmark one scenario: recreate it, wait for it to settle, run the agent, and append the run to `results/runs.jsonl`:
+Benchmark one tier: recreate it, run the agent, and append the run to `results/runs.jsonl` (or to the file given with `-out`):
 
 ```bash
 go run ./cmd/reconcile -scenario cache-port -model opus -allow-writes
 ```
 
-See what the tools return without calling the API:
+See what the tools return, without calling the API:
 
 ```bash
-go run ./cmd/reconcile -scenario chain -dump
+go run ./cmd/reconcile -scenario multi-fault -dump
 ```
 
-Grade every ungraded run in `results/runs.jsonl`:
+The full experiment. The tiers use separate namespaces, so their loops run in parallel, each writing its own file:
+
+```bash
+go build -o /tmp/reconcile ./cmd/reconcile && mkdir -p results/parts && for s in bad-image unschedulable multi-fault cache-port; do ( for i in $(seq 10); do for m in haiku opus; do /tmp/reconcile -scenario $s -model $m -out results/parts/$s.jsonl; /tmp/reconcile -scenario $s -model $m -allow-writes -out results/parts/$s.jsonl; done; done ) > /tmp/tier-$s.log 2>&1 & done; wait
+```
+
+```bash
+cat results/parts/*.jsonl > results/runs.jsonl && rm -r results/parts
+```
+
+Grade every ungraded run in `results/runs.jsonl` into `results/grades.jsonl`:
 
 ```bash
 go run ./cmd/judge
 ```
 
-Useful flags: `-model opus|sonnet|haiku`, `-allow-writes` for repair mode, `-verbose` to print each step, and on the judge, `-only scenario,...` to limit what it grades and `-show` to print a judge input without calling the API.
+**Flags:**
+
+- On `reconcile`:
+  - `-model opus|sonnet|haiku`
+  - `-allow-writes` for repair mode
+  - `-verbose` to print each step
+- On the judge:
+  - `-only scenario,...` limits what it grades
+  - `-show` prints a judge input without calling the API
 
 ## Layout
 
 ```
-cmd/reconcile     the agent: live checks and benchmark runs
-cmd/judge         LLM judge over results/runs.jsonl
-internal/agent    the loop and the diagnose / repair prompts
-internal/llm      Messages API client, prompt caching, model aliases
-internal/tools    namespace-scoped tools, patch guard, rollout check
+cmd/reconcile       the agent: live checks and benchmark runs
+cmd/judge           the LLM judge and its rubric
+internal/agent      the loop, the diagnose and repair prompts, the run record
+internal/llm        Messages API client, prompt caching, model aliases
+internal/tools      namespace-scoped tools, patch guard, rollout check
 internal/telemetry  token prices and cost per run
-scenarios/        broken manifests, truths/ with their answer keys, retired/ for dropped ones
-results/          runs.jsonl (every run) and grades.jsonl (the judge's grades);
-                  logs/ holds console output, archive/ older runs and grades
+scenarios/          one broken manifest per tier, and truths/ with their answer keys
+results/            runs.jsonl and grades.jsonl
 ```
 
 ## Next
 
-- More scenarios built to the narrower spec above, to test whether the `cache-port` result generalizes
-- Escalation: start with Haiku and hand off to Opus when a Haiku patch fails its rollout check
-- Ablations: thinking off, effort levels, caching the conversation history, trimmed tool output
+- **Escalation:** start with Haiku and hand off to Opus when a Haiku patch fails its rollout check. On these runs that would have escalated 3 of 40 repairs and cost about 88% less than always using Opus.
+- **Sonnet 5.5,** the mid-priced model, on the same four tiers.
+- **More tier-4 faults** built to the `cache-port` pattern, to test whether the result generalizes.
+- **A `get_services` tool,** to test whether tier 4 is hard for lack of information or for lack of reasoning.

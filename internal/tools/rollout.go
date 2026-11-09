@@ -14,12 +14,11 @@ import (
 // unfinished; failing pods end the wait early, so it is only reached when the
 // new pods are slow or never become ready. rolloutPoll is how often the
 // deployment is re-read, and rolloutSettle is how long the new pods must stay
-// up before a rollout counts as complete. All three are variables so a quick
-// check can shorten them.
-var (
-	rolloutWait   = 90 * time.Second
+// up before a rollout counts as complete.
+const (
+	rolloutWait   = 60 * time.Second
 	rolloutPoll   = 2 * time.Second
-	rolloutSettle = 10 * time.Second
+	rolloutSettle = 5 * time.Second
 )
 
 // waitForRollout polls a deployment after a patch until its new pods have

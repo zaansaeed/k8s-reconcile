@@ -22,19 +22,6 @@ import (
 	"github.com/zaansaeed/k8s-reconcile/internal/tools"
 )
 
-type runRecord struct {
-	Time      time.Time
-	Scenario  string
-	Model     string
-	Mode      string
-	Steps     []agent.StepInfo
-	Answer    string
-	Exhausted bool
-	Error     string
-	Patches   []tools.AppliedPatch
-	PodsAfter string
-}
-
 type gradeRecord struct {
 	Run      time.Time
 	Scenario string
@@ -72,7 +59,7 @@ func main() {
 
 	judgeClient := llm.New(llm.DefaultConfig(rubric, *judgeModel), []tools.Spec{gradeTool})
 	judgeTotals := telemetry.Run{Model: judgeClient.Model()}
-	for _, run := range readLines[runRecord](*runsPath) {
+	for _, run := range readLines[agent.Record](*runsPath) {
 		if alreadyGraded[run.Time] || (*onlyScenarios != "" && !slices.Contains(strings.Split(*onlyScenarios, ","), run.Scenario)) {
 			continue
 		}
@@ -94,7 +81,7 @@ func main() {
 	fmt.Printf("\njudge cost $%.4f  %s\n", totalCost, judgeTotals.UsageLine(judgeTotals.Usage))
 }
 
-func gradeRun(judgeClient *llm.Client, run runRecord) gradeRecord {
+func gradeRun(judgeClient *llm.Client, run agent.Record) gradeRecord {
 	record := gradeRecord{Run: run.Time, Scenario: run.Scenario, Model: run.Model, Mode: run.Mode, Judge: judgeClient.Model()}
 	prompt, err := judgeInput(run)
 	if err != nil {
@@ -121,7 +108,7 @@ func gradeRun(judgeClient *llm.Client, run runRecord) gradeRecord {
 	return record
 }
 
-func judgeInput(run runRecord) (string, error) {
+func judgeInput(run agent.Record) (string, error) {
 	manifest, manifestErr := os.ReadFile(filepath.Join("scenarios", run.Scenario+".yaml"))
 	truth, truthErr := os.ReadFile(filepath.Join("scenarios", "truths", run.Scenario+".yaml"))
 	if err := errors.Join(manifestErr, truthErr); err != nil {
@@ -130,7 +117,7 @@ func judgeInput(run runRecord) (string, error) {
 	return fmt.Sprintf("<manifest>\n%s</manifest>\n\n<truth>\n%s</truth>\n\n<transcript>\n%s</transcript>", manifest, truth, transcript(run)), nil
 }
 
-func transcript(run runRecord) string {
+func transcript(run agent.Record) string {
 	var text strings.Builder
 	fmt.Fprintf(&text, "mode: %s\n", run.Mode)
 	for _, step := range run.Steps {

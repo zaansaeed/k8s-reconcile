@@ -21,14 +21,14 @@ func New(config Config, specs []tools.Spec) *Client {
 	return &Client{
 		api:      anthropic.NewClient(),
 		config:   config,
-		toolDefs: toolParams(specs), //ours specs -> SDK's tool definitions
+		toolDefs: toolParams(specs), //our specs -> SDK's tool definitions
 	}
 }
 
 // toolParams converts our neutral tool specs into the SDK's tool definitions.
 func toolParams(specs []tools.Spec) []anthropic.ToolUnionParam {
-	params := make([]anthropic.ToolUnionParam, 0, len(specs)) //initialize empty array max len 3
-	for _, spec := range specs {                              //loop over specs (our tools)
+	params := make([]anthropic.ToolUnionParam, 0, len(specs))
+	for _, spec := range specs {
 		required := spec.Required
 		if required == nil {
 			required = []string{}
@@ -58,25 +58,26 @@ func (client *Client) Model() string {
 // params assembles one request from the client's standing settings and the
 // conversation so far.
 func (client *Client) params(messages []anthropic.MessageParam) anthropic.MessageNewParams {
-	system := []anthropic.TextBlockParam{{Text: client.config.System}} //prompt
-	if client.config.CacheSystem {
-		// Marks where the cached prefix ends. The server renders a request as
-		// tools -> system -> messages, so a breakpoint on the final system
-		// block caches every tool schema and the system prompt as one entry,
-		// leaving the growing message history outside it. Those bytes are
-		// identical on every call, so step 1 writes the entry and every later
-		// step reads it at a fraction of the input price.
-		system[len(system)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
-	}
+	// The server renders a request as tools -> system -> messages, so a
+	// breakpoint on the system block caches every tool schema and the system
+	// prompt as one entry. Those bytes are identical in every run, so each run
+	// reads them instead of writing them again.
+	system := []anthropic.TextBlockParam{{Text: client.config.System, CacheControl: anthropic.NewCacheControlEphemeralParam()}}
 
-	return anthropic.MessageNewParams{
-		Model:        anthropic.Model(client.config.Model),
-		MaxTokens:    client.config.MaxTokens,
-		System:       system,
-		Messages:     messages,
-		Tools:        client.toolDefs,
-		OutputConfig: anthropic.OutputConfigParam{Effort: client.config.Effort},
+	params := anthropic.MessageNewParams{
+		Model:     anthropic.Model(client.config.Model),
+		MaxTokens: client.config.MaxTokens,
+		System:    system,
+		Messages:  messages,
+		Tools:     client.toolDefs,
 	}
+	// Automatic caching moves a second breakpoint to the end of each request,
+	// so every step reads the conversation so far from the cache. A one-shot
+	// request, like the judge's, would only pay to write it, so it is opt-in.
+	if client.config.CacheHistory {
+		params.CacheControl = anthropic.NewCacheControlEphemeralParam()
+	}
+	return params
 }
 
 // Send makes one API call with the conversation so far and returns the

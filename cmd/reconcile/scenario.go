@@ -13,25 +13,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/zaansaeed/k8s-reconcile/internal/agent"
-	"github.com/zaansaeed/k8s-reconcile/internal/llm"
-	"github.com/zaansaeed/k8s-reconcile/internal/tools"
 )
-
-type record struct {
-	Time      time.Time
-	Scenario  string
-	Model     string
-	Mode      string
-	Steps     []agent.StepInfo
-	Answer    string
-	Exhausted bool
-	Error     string
-	Usage     llm.Usage
-	CostUSD   float64
-	Seconds   float64
-	Patches   []tools.AppliedPatch
-	PodsAfter string
-}
 
 func recreate(ctx context.Context, name string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join("scenarios", "truths", name+".yaml"))
@@ -45,6 +27,10 @@ func recreate(ctx context.Context, name string) (string, error) {
 	if err := yaml.Unmarshal(raw, &truth); err != nil {
 		return "", fmt.Errorf("reading truth for %s: %w", name, err)
 	}
+	// The scenarios' shell loops ignore SIGTERM, so a normal delete waits out
+	// each pod's 30s grace period. These pods are being thrown away anyway.
+	exec.CommandContext(ctx, "kubectl", "delete", "pods", "--all", "-n", truth.Namespace,
+		"--grace-period=0", "--force", "--ignore-not-found").Run()
 	if out, err := exec.CommandContext(ctx, "kubectl", "delete", "namespace", truth.Namespace,
 		"--ignore-not-found", "--wait=true", "--timeout=3m").CombinedOutput(); err != nil {
 		return "", fmt.Errorf("deleting namespace %s: %v: %s", truth.Namespace, err, out)
@@ -54,7 +40,7 @@ func recreate(ctx context.Context, name string) (string, error) {
 	}
 	settle := truth.Settle.Duration
 	if settle == 0 {
-		settle = 15 * time.Second
+		settle = 10 * time.Second
 	}
 
 	fmt.Printf("\n NEW SCENARIO: %s \n", truth.Namespace)
@@ -63,15 +49,15 @@ func recreate(ctx context.Context, name string) (string, error) {
 	return truth.Namespace, nil
 }
 
-func save(rec record) error {
+func save(rec agent.Record, path string) error {
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll("results", 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join("results", "runs.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}

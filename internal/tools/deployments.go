@@ -12,7 +12,7 @@ import (
 )
 
 // maxDeployments caps the output so a crowded namespace can't flood the
-// model's context; diagnosis scenarios have one or two.
+// model's context; scenarios have one to three.
 const maxDeployments = 10
 
 // GetDeployments returns every deployment in the namespace as compact text:

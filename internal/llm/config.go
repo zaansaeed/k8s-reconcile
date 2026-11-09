@@ -12,20 +12,19 @@ var modelAliases = map[string]string{
 	"haiku":  ModelHaiku,
 }
 
-func ResolveModel(name string) string {
+func resolveModel(name string) string {
 	if id, ok := modelAliases[name]; ok {
 		return id
 	}
 	return name
 }
 
-// DefaultConfig returns the settings the single-agent baseline run uses, for
-// the given system prompt and model (an alias such as "haiku", or a full ID).
+// DefaultConfig returns the settings for the given system prompt and model
+// (an alias such as "haiku", or a full ID).
 func DefaultConfig(system, model string) Config {
 	return Config{
-		Model:       ResolveModel(model),
-		MaxTokens:   8192,
-		System:      system,
-		CacheSystem: true,
+		Model:     resolveModel(model),
+		MaxTokens: 8192,
+		System:    system,
 	}
 }

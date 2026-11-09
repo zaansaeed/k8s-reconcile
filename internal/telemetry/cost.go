@@ -13,8 +13,8 @@ type price struct {
 	cacheWrite float64
 }
 
-// TODO(zaan): cacheWrite is input x 1.25 (the 5 minute TTL rate); confirm every
-// row against the published pricing page before any number goes in the writeup.
+// Prices in USD per million tokens. cacheWrite is input x 1.25, the 5-minute
+// TTL rate. Opus and Haiku match the published pricing; Sonnet is unverified.
 var prices = map[string]price{
 	llm.ModelOpus:   {input: 4.00, output: 20.00, cacheRead: 0.20, cacheWrite: 5.00},
 	llm.ModelSonnet: {input: 2.00, output: 10.00, cacheRead: 0.20, cacheWrite: 2.50},

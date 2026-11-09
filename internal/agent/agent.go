@@ -1,5 +1,5 @@
-// Package agent runs the diagnose loop: ask the model, run the tools it asks
-// for, feed the output back, repeat until it answers or the step cap is hit.
+// Package agent runs the diagnose and repair loop: ask the model, run the tools
+// it asks for, feed the output back, repeat until it answers or the step cap is hit.
 package agent
 
 import (
@@ -43,6 +43,26 @@ type Result struct {
 	Answer    string
 	Steps     int
 	Exhausted bool
+}
+
+// Record is one benchmark run as saved in runs.jsonl: what was asked, every
+// step, the answer, what it cost, and the cluster's state afterwards. The
+// runner writes it and the judge reads it.
+type Record struct {
+	Time         time.Time
+	Scenario     string
+	Model        string
+	Mode         string
+	CacheHistory bool
+	Steps        []StepInfo
+	Answer       string
+	Exhausted    bool
+	Error        string
+	Usage        llm.Usage
+	CostUSD      float64
+	Seconds      float64
+	Patches      []tools.AppliedPatch
+	PodsAfter    string
 }
 
 // Run drives the loop until the model stops asking for tools.

@@ -7,11 +7,10 @@ import (
 )
 
 type Config struct {
-	Model       string
-	MaxTokens   int64
-	System      string
-	CacheSystem bool
-	Effort      anthropic.OutputConfigEffort
+	Model        string
+	MaxTokens    int64
+	System       string
+	CacheHistory bool
 }
 
 type ToolCall struct {
